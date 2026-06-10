@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 
 # Set CMP0175 to NEW to properly handle add_custom_command arguments
 if(POLICY CMP0175)
@@ -7,8 +7,8 @@ endif()
 
 set(PROJECT_NAME "webview_windows")
 
-set(WIL_VERSION "1.0.220914.1")
-set(WEBVIEW_VERSION "1.0.1210.39")
+set(WIL_VERSION "1.0.260126.7")
+set(WEBVIEW_VERSION "1.0.3967.48")
 
 message(VERBOSE "CMake system version is ${CMAKE_SYSTEM_VERSION} (using SDK ${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION})")
 
@@ -18,37 +18,13 @@ project(${PROJECT_NAME} LANGUAGES CXX)
 # not be changed
 set(PLUGIN_NAME "webview_windows_plugin")
 
-set(NUGET_URL https://dist.nuget.org/win-x86-commandline/v5.10.0/nuget.exe)
-set(NUGET_SHA256 852b71cc8c8c2d40d09ea49d321ff56fd2397b9d6ea9f96e532530307bbbafd3)
+# NuGet tooling shared with the native test build (windows/test).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/nuget.cmake)
 
-# Find or download NuGet
-find_program(NUGET nuget)
-if(NOT NUGET)
-  message(NOTICE "Nuget is not installed.")
-  set(NUGET ${CMAKE_BINARY_DIR}/nuget.exe)
-  if (NOT EXISTS ${NUGET})
-    message(NOTICE "Attempting to download nuget.")
-    file(DOWNLOAD ${NUGET_URL} ${NUGET})
-  endif()
-
-  file(SHA256 ${NUGET} NUGET_DL_HASH)
-  if (NOT NUGET_DL_HASH STREQUAL NUGET_SHA256)
-    message(FATAL_ERROR "Integrity check for ${NUGET} failed.")
-  endif()
-endif()
-
-# Create custom target for dependencies
-add_custom_target(${PROJECT_NAME}_DEPENDENCIES_DOWNLOAD ALL)
-
-# Download dependencies using NuGet
-# Note: Removed DEPENDS keyword from TARGET version of add_custom_command
-add_custom_command(
-  TARGET ${PROJECT_NAME}_DEPENDENCIES_DOWNLOAD PRE_BUILD
-  COMMAND ${CMAKE_COMMAND} -E echo "Downloading dependencies..."
-  COMMAND ${NUGET} install Microsoft.Windows.ImplementationLibrary -Version ${WIL_VERSION} -ExcludeVersion -OutputDirectory ${CMAKE_BINARY_DIR}/packages
-  COMMAND ${NUGET} install Microsoft.Web.WebView2 -Version ${WEBVIEW_VERSION} -ExcludeVersion -OutputDirectory ${CMAKE_BINARY_DIR}/packages
-  COMMENT "Downloading and installing NuGet packages"
-)
+ensure_nuget_package(Microsoft.Windows.ImplementationLibrary ${WIL_VERSION}
+                     build/native/Microsoft.Windows.ImplementationLibrary.targets)
+ensure_nuget_package(Microsoft.Web.WebView2 ${WEBVIEW_VERSION}
+                     build/native/Microsoft.Web.WebView2.targets)
 
 # Define source files
 set(PLUGIN_SOURCES
@@ -60,6 +36,7 @@ set(PLUGIN_SOURCES
   "texture_bridge.cc"
   "texture_bridge_gpu.cc"
   "graphics_context.cc"
+  "util/cursor_util.cc"
   "util/direct3d11.interop.cc"
   "util/rohelper.cc"
   "util/string_converter.cc"
@@ -68,27 +45,24 @@ set(PLUGIN_SOURCES
 # Create the plugin library
 add_library(${PLUGIN_NAME} SHARED ${PLUGIN_SOURCES})
 
-# Configure compiler options
-if(MSVC)
-  target_compile_options(${PLUGIN_NAME} PRIVATE "/await")
-endif()
-
 # Apply standard settings
 apply_standard_settings(${PLUGIN_NAME})
 
-# Set C++ standard to 20 for std::format support
-target_compile_features(${PLUGIN_NAME} PUBLIC cxx_std_20)
+# Build the plugin itself as C++23. Deliberately PRIVATE: the exported plugin
+# header is plain C ABI, so the consuming app's language level must not be
+# forced up by this target.
+target_compile_features(${PLUGIN_NAME} PRIVATE cxx_std_23)
 
 # Configure visibility
-set_target_properties(${PLUGIN_NAME} PROPERTIES 
+set_target_properties(${PLUGIN_NAME} PROPERTIES
   CXX_VISIBILITY_PRESET hidden
 )
 
 # Add dependencies
-target_link_libraries(${PLUGIN_NAME} PRIVATE 
+target_link_libraries(${PLUGIN_NAME} PRIVATE
   ${CMAKE_BINARY_DIR}/packages/Microsoft.Web.WebView2/build/native/Microsoft.Web.WebView2.targets
   ${CMAKE_BINARY_DIR}/packages/Microsoft.Windows.ImplementationLibrary/build/native/Microsoft.Windows.ImplementationLibrary.targets
-  flutter 
+  flutter
   flutter_wrapper_plugin
 )
 
@@ -101,4 +75,4 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 # Set bundled libraries
 set(webview_windows_bundled_libraries
   PARENT_SCOPE
-) 
+)

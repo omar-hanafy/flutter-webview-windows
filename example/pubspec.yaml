@@ -4,7 +4,7 @@ description: Demonstrates how to use the webview_windows plugin.
 publish_to: 'none'
 
 environment:
-  sdk: ">=2.12.0 <3.0.0"
+  sdk: ^3.12.0
 
 dependencies:
   flutter:
@@ -12,11 +12,15 @@ dependencies:
 
   webview_windows:
     path: ../
-  window_manager: ^0.2.7
 
 dev_dependencies:
+  ffi: ^2.2.0
+  flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
+  win32: ^6.3.0
 
 flutter:
   uses-material-design: true

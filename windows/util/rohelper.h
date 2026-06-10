@@ -90,6 +90,11 @@ class RoHelper {
   RoUninitialize_* mFpRoUninitialize;
 
   bool mWinRtAvailable;
+  // True only when this instance actually initialized the apartment (RoInitialize
+  // returned S_OK/S_FALSE), so the destructor balances it with RoUninitialize.
+  // RPC_E_CHANGED_MODE means WinRT is usable but we took no reference, so we
+  // must NOT uninitialize in that case.
+  bool mShouldUninitialize;
 
   HMODULE mComBaseModule;
   HMODULE mCoreMessagingModule;

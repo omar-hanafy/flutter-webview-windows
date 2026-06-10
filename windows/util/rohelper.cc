@@ -57,6 +57,7 @@ RoHelper::RoHelper(RO_INIT_TYPE init_type)
       mFpRoInitialize(nullptr),
       mFpRoUninitialize(nullptr),
       mWinRtAvailable(false),
+      mShouldUninitialize(false),
       mComBaseModule(nullptr),
       mCoreMessagingModule(nullptr) {
 #ifdef WINUWP
@@ -118,15 +119,18 @@ RoHelper::RoHelper(RO_INIT_TYPE init_type)
 
   auto result = RoInitialize(init_type);
 
-  if (SUCCEEDED(result) || result == S_FALSE || result == RPC_E_CHANGED_MODE) {
+  if (SUCCEEDED(result) || result == RPC_E_CHANGED_MODE) {
     mWinRtAvailable = true;
   }
+  // Only S_OK/S_FALSE add an apartment reference that we must release.
+  // RPC_E_CHANGED_MODE leaves WinRT usable but takes no reference.
+  mShouldUninitialize = SUCCEEDED(result);
 #endif
 }
 
 RoHelper::~RoHelper() {
 #ifndef WINUWP
-  if (mWinRtAvailable) {
+  if (mShouldUninitialize) {
     RoUninitialize();
   }
 

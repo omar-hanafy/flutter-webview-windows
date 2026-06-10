@@ -1,6 +1,8 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.20)
 
-set(CMAKE_SYSTEM_VERSION 10.0.22000 CACHE STRING INTERNAL FORCE)
+# Target the latest installed Windows SDK. The plugin needs a Windows 11 SDK
+# (10.0.22000 or newer); see the package README for details.
+set(CMAKE_SYSTEM_VERSION 10.0 CACHE STRING "" FORCE)
 
 project(webview_windows_example LANGUAGES CXX)
 

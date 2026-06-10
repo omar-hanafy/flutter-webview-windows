@@ -58,10 +58,12 @@ inline COREWEBVIEW2_PERMISSION_STATE WebViewPermissionStateToCW2PermissionState(
 
 Webview::Webview(
     wil::com_ptr<ICoreWebView2CompositionController> composition_controller,
-    WebviewHost* host, HWND hwnd, bool owns_window, bool offscreen_only)
+    WebviewHost* host, HWND hwnd, HWND flutter_view_hwnd, bool owns_window,
+    bool offscreen_only)
     : composition_controller_(std::move(composition_controller)),
       host_(host),
       hwnd_(hwnd),
+      flutter_view_hwnd_(flutter_view_hwnd),
       owns_window_(owns_window) {
   webview_controller_ =
       composition_controller_.try_query<ICoreWebView2Controller3>();
@@ -74,6 +76,18 @@ Webview::Webview(
   webview_controller_->put_BoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS);
   webview_controller_->put_ShouldDetectMonitorScaleChanges(FALSE);
   webview_controller_->put_RasterizationScale(1.0);
+
+  if (flutter_view_hwnd) {
+    // Reparent the WebView2 input windows into the Flutter view's window
+    // tree. WebView2 composition hosting has no keyboard injection API, so
+    // the browser's hidden input window must take real Win32 focus for
+    // typing to work. With the (default) message-only parent window, that
+    // focus change leaves the host window's tree and deactivates it (gray
+    // title bar, Flutter loses all key events). Parenting to the Flutter
+    // view keeps focus changes inside one top-level tree.
+    // See https://github.com/jnschulze/flutter-webview-windows/issues/230.
+    webview_controller_->put_ParentWindow(flutter_view_hwnd);
+  }
 
   wil::com_ptr<ICoreWebView2Settings> settings;
   if (SUCCEEDED(webview_->get_Settings(settings.put()))) {
@@ -90,6 +104,15 @@ Webview::Webview(
 }
 
 Webview::~Webview() {
+  // Drop the focus callback before closing: Close() can synchronously raise
+  // LostFocus, and by destruction time the owning bridge's event sink may
+  // already be gone.
+  focus_changed_callback_ = nullptr;
+  if (webview_controller_) {
+    // Explicitly close the controller so WebView2 tears down the browser
+    // windows that were reparented into the Flutter view's window tree.
+    webview_controller_->Close();
+  }
   if (owns_window_) {
     DestroyWindow(hwnd_);
   }
@@ -226,9 +249,9 @@ void Webview::RegisterEventHandlers() {
   webview_->add_SourceChanged(
       Callback<ICoreWebView2SourceChangedEventHandler>(
           [this](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
-            LPWSTR wurl;
+            wil::unique_cotaskmem_string wurl;
             if (url_changed_callback_ && webview_->get_Source(&wurl) == S_OK) {
-              std::string url = util::Utf8FromUtf16(wurl);
+              std::string url = util::Utf8FromUtf16(wurl.get());
               url_changed_callback_(url);
             }
 
@@ -240,10 +263,10 @@ void Webview::RegisterEventHandlers() {
   webview_->add_DocumentTitleChanged(
       Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
           [this](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
-            LPWSTR wtitle;
+            wil::unique_cotaskmem_string wtitle;
             if (document_title_changed_callback_ &&
                 webview_->get_DocumentTitle(&wtitle) == S_OK) {
-              std::string title = util::Utf8FromUtf16(wtitle);
+              std::string title = util::Utf8FromUtf16(wtitle.get());
               document_title_changed_callback_(title);
             }
 
@@ -288,6 +311,22 @@ void Webview::RegisterEventHandlers() {
           .Get(),
       &event_registrations_.lost_focus_token_);
 
+  if (flutter_view_hwnd_) {
+    // When Tab traversal moves past the page's last focusable element (or
+    // before its first), return Win32 keyboard focus to the Flutter view so
+    // focus leaves the webview instead of cycling inside the page forever.
+    webview_controller_->add_MoveFocusRequested(
+        Callback<ICoreWebView2MoveFocusRequestedEventHandler>(
+            [this](ICoreWebView2Controller* sender,
+                   ICoreWebView2MoveFocusRequestedEventArgs* args) -> HRESULT {
+              SetFocus(flutter_view_hwnd_);
+              args->put_Handled(TRUE);
+              return S_OK;
+            })
+            .Get(),
+        &event_registrations_.move_focus_requested_token_);
+  }
+
   webview_->add_WebMessageReceived(
       Callback<ICoreWebView2WebMessageReceivedEventHandler>(
           [this](ICoreWebView2* sender,
@@ -327,8 +366,12 @@ void Webview::RegisterEventHandlers() {
               permission_requested_callback_(
                   uri, CW2PermissionKindToPermissionKind(kind),
                   is_user_initiated == TRUE,
+                  // The event args are only borrowed for the duration of this
+                  // handler, but the completer runs after an async round trip
+                  // to Dart; keep a real reference (AddRef) on them.
                   [deferral = std::move(deferral),
-                   args = std::move(args)](WebviewPermissionState state) {
+                   args = wil::com_ptr<ICoreWebView2PermissionRequestedEventArgs>(
+                       args)](WebviewPermissionState state) {
                     args->put_State(
                         WebViewPermissionStateToCW2PermissionState(state));
                     deferral->Complete();
@@ -378,13 +421,15 @@ void Webview::RegisterEventHandlers() {
         Callback<ICoreWebView2DownloadStartingEventHandler>(
             [this](ICoreWebView2* sender,
                    ICoreWebView2DownloadStartingEventArgs* args) -> HRESULT {
-              wil::com_ptr<ICoreWebView2Deferral> deferral;
-              args->GetDeferral(&deferral);
-
+              // Everything below runs synchronously, so no deferral is taken;
+              // taking one without completing it would leave the event pending.
               args->put_Handled(TRUE);
 
               wil::com_ptr<ICoreWebView2DownloadOperation> download;
-              args->get_DownloadOperation(&download);
+              if (FAILED(args->get_DownloadOperation(download.put())) ||
+                  !download) {
+                return S_OK;
+              }
 
               INT64 totalBytesToReceive = 0;
               download->get_TotalBytesToReceive(&totalBytesToReceive);
@@ -772,8 +817,7 @@ bool Webview::Suspend() {
     return false;
   }
 
-  wil::com_ptr<ICoreWebView2_3> webview;
-  webview = webview_.query<ICoreWebView2_3>();
+  auto webview = webview_.try_query<ICoreWebView2_3>();
   if (!webview) {
     return false;
   }
@@ -792,13 +836,20 @@ bool Webview::Resume() {
     return false;
   }
 
-  wil::com_ptr<ICoreWebView2_3> webview;
-  webview = webview_.query<ICoreWebView2_3>();
+  auto webview = webview_.try_query<ICoreWebView2_3>();
   if (!webview) {
     return false;
   }
   return webview->Resume() == S_OK &&
          webview_controller_->put_IsVisible(true) == S_OK;
+}
+
+bool Webview::MoveFocus() {
+  if (!IsValid()) {
+    return false;
+  }
+  return webview_controller_->MoveFocus(
+             COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) == S_OK;
 }
 
 bool Webview::SetVirtualHostNameMapping(
@@ -808,8 +859,7 @@ bool Webview::SetVirtualHostNameMapping(
     return false;
   }
 
-  wil::com_ptr<ICoreWebView2_3> webview;
-  webview = webview_.query<ICoreWebView2_3>();
+  auto webview = webview_.try_query<ICoreWebView2_3>();
   if (!webview) {
     return false;
   }
@@ -828,9 +878,9 @@ bool Webview::SetVirtualHostNameMapping(
       break;
   }
 
-  return webview->SetVirtualHostNameToFolderMapping(
+  return SUCCEEDED(webview->SetVirtualHostNameToFolderMapping(
       util::Utf16FromUtf8(hostName).c_str(), util::Utf16FromUtf8(path).c_str(),
-      accessKindIntValue);
+      accessKindIntValue));
 }
 
 bool Webview::ClearVirtualHostNameMapping(const std::string& hostName) {
@@ -838,14 +888,13 @@ bool Webview::ClearVirtualHostNameMapping(const std::string& hostName) {
     return false;
   }
 
-  wil::com_ptr<ICoreWebView2_3> webview;
-  webview = webview_.query<ICoreWebView2_3>();
+  auto webview = webview_.try_query<ICoreWebView2_3>();
   if (!webview) {
     return false;
   }
 
-  return webview->ClearVirtualHostNameToFolderMapping(
-      util::Utf16FromUtf8(hostName).c_str());
+  return SUCCEEDED(webview->ClearVirtualHostNameToFolderMapping(
+      util::Utf16FromUtf8(hostName).c_str()));
 }
 
 void Webview::UpdateDownloadProgress(ICoreWebView2DownloadOperation* download) {

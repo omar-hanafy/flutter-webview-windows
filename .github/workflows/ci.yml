@@ -1,21 +1,58 @@
 name: CI
 on: [push, pull_request]
 
-defaults:
-  run:
-    working-directory: example
-
 jobs:
-  build_windows:
-    name: Build on Windows
+  analyze_and_test:
+    name: Analyze & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter pub get
+        working-directory: example
+      - run: dart format --output=none --set-exit-if-changed .
+      - run: flutter analyze
+      - run: flutter analyze
+        working-directory: example
+      - run: flutter test
+      - run: flutter test
+        working-directory: example
+
+  native_tests:
+    name: Native unit tests (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S windows/test -B build/native_tests
+      - name: Build
+        run: cmake --build build/native_tests --config Release
+      - name: Run
+        run: ctest --test-dir build/native_tests -C Release --output-on-failure
+
+  build_windows:
+    name: Build Windows example
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          submodules: true
-      - uses: subosito/flutter-action@v1
-        with:
-          channel: "beta"
-      - run: flutter config --enable-windows-desktop
+          channel: stable
+          cache: true
       - run: flutter pub get
-      - run: flutter build windows
+        working-directory: example
+      - run: flutter build windows --release
+        working-directory: example
+      - name: Verify bundle contents
+        shell: pwsh
+        working-directory: example
+        run: |
+          $bundle = "build/windows/x64/runner/Release"
+          Get-ChildItem $bundle
+          if (!(Test-Path "$bundle/webview_windows_example.exe")) { throw "missing example exe" }
+          if (!(Test-Path "$bundle/webview_windows_plugin.dll")) { throw "missing plugin dll" }
+          if (!(Test-Path "$bundle/WebView2Loader.dll")) { throw "missing WebView2Loader.dll" }

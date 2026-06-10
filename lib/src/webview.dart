@@ -1,27 +1,44 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ui';
 
 import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'cursor.dart';
 import 'enums.dart';
 
+/// A snapshot of the webview's navigation history state.
 class HistoryChanged {
+  /// Whether the webview can navigate back.
   final bool canGoBack;
+
+  /// Whether the webview can navigate forward.
   final bool canGoForward;
+
+  /// Creates a history snapshot.
   const HistoryChanged(this.canGoBack, this.canGoForward);
 }
 
+/// A download lifecycle notification emitted on
+/// [WebviewController.onDownloadEvent].
 class WebviewDownloadEvent {
+  /// The kind of download event.
   final WebviewDownloadEventKind kind;
+
+  /// The URL the download originates from.
   final String url;
+
+  /// The target file path of the download.
   final String resultFilePath;
+
+  /// The number of bytes received so far.
   final int bytesReceived;
+
+  /// The expected total number of bytes, or 0 if unknown.
   final int totalBytesToReceive;
+
+  /// Creates a download event.
   const WebviewDownloadEvent(
     this.kind,
     this.url,
@@ -31,15 +48,24 @@ class WebviewDownloadEvent {
   );
 }
 
-typedef PermissionRequestedDelegate
-    = FutureOr<WebviewPermissionDecision> Function(
-        String url, WebviewPermissionKind permissionKind, bool isUserInitiated);
+/// Invoked when the web content requests a browser permission (camera,
+/// microphone, geolocation etc.).
+///
+/// Return a [WebviewPermissionDecision] to allow or deny the request, or
+/// [WebviewPermissionDecision.none] to defer to the WebView2 default
+/// behavior.
+typedef PermissionRequestedDelegate =
+    FutureOr<WebviewPermissionDecision> Function(
+      String url,
+      WebviewPermissionKind permissionKind,
+      bool isUserInitiated,
+    );
 
+/// Identifies a script registered with
+/// [WebviewController.addScriptToExecuteOnDocumentCreated].
 typedef ScriptID = String;
 
-/// Attempts to translate a button constant such as [kPrimaryMouseButton]
-/// to a [PointerButton]
-PointerButton getButton(int value) {
+PointerButton _getButton(int value) {
   switch (value) {
     case kPrimaryMouseButton:
       return PointerButton.primary;
@@ -55,31 +81,42 @@ PointerButton getButton(int value) {
 const String _pluginChannelPrefix = 'io.jns.webview.win';
 const MethodChannel _pluginChannel = MethodChannel(_pluginChannelPrefix);
 
+/// The state of a [WebviewController], exposed through
+/// [WebviewController.value].
 class WebviewValue {
-  const WebviewValue({
-    required this.isInitialized,
-  });
+  /// Creates a webview state.
+  const WebviewValue({required this.isInitialized});
 
+  /// Creates the initial, uninitialized state.
+  const WebviewValue.uninitialized() : this(isInitialized: false);
+
+  /// Whether [WebviewController.initialize] has completed successfully.
   final bool isInitialized;
 
-  WebviewValue copyWith({
-    bool? isInitialized,
-  }) {
-    return WebviewValue(
-      isInitialized: isInitialized ?? this.isInitialized,
-    );
+  /// Returns a copy of this value with the given fields replaced.
+  WebviewValue copyWith({bool? isInitialized}) {
+    return WebviewValue(isInitialized: isInitialized ?? this.isInitialized);
   }
-
-  WebviewValue.uninitialized()
-      : this(
-          isInitialized: false,
-        );
 }
 
-/// Controls a WebView and provides streams for various change events.
+/// Controls a native WebView2 instance and exposes its events as broadcast
+/// streams.
+///
+/// The typical lifecycle is:
+///
+/// ```dart
+/// final controller = WebviewController();
+/// await controller.initialize();
+/// await controller.loadUrl('https://flutter.dev');
+/// // ... embed it with a [Webview] widget ...
+/// await controller.dispose();
+/// ```
+///
+/// All event streams are broadcast streams: they support multiple listeners
+/// and drop events that are emitted while nobody listens.
 class WebviewController extends ValueNotifier<WebviewValue> {
   /// Explicitly initializes the underlying WebView environment
-  /// using  an optional [browserExePath], an optional [userDataPath]
+  /// using an optional [browserExePath], an optional [userDataPath]
   /// and optional Chromium command line arguments [additionalArguments].
   ///
   /// The environment is shared between all WebviewController instances and
@@ -87,39 +124,74 @@ class WebviewController extends ValueNotifier<WebviewValue> {
   /// WebviewController is created/initialized.
   ///
   /// Throws [PlatformException] if the environment was initialized before.
-  static Future<void> initializeEnvironment(
-      {String? userDataPath,
-      String? browserExePath,
-      String? additionalArguments}) async {
+  static Future<void> initializeEnvironment({
+    String? userDataPath,
+    String? browserExePath,
+    String? additionalArguments,
+  }) async {
     return _pluginChannel
         .invokeMethod('initializeEnvironment', <String, dynamic>{
-      'userDataPath': userDataPath,
-      'browserExePath': browserExePath,
-      'additionalArguments': additionalArguments
-    });
+          'userDataPath': userDataPath,
+          'browserExePath': browserExePath,
+          'additionalArguments': additionalArguments,
+        });
   }
 
-  /// Get the browser version info including channel name if it is not the
-  /// WebView2 Runtime.
-  /// Returns [null] if the webview2 runtime is not installed.
+  /// Returns the browser version info including channel name if it is not the
+  /// stable WebView2 Runtime.
+  ///
+  /// Returns `null` if the WebView2 Runtime is not installed.
   static Future<String?> getWebViewVersion() async {
     return _pluginChannel.invokeMethod<String>('getWebViewVersion');
   }
 
-  late Completer<void> _creatingCompleter;
+  /// Returns native (Win32) keyboard focus to the Flutter view, restoring
+  /// Flutter's keyboard event handling (shortcuts, text fields, etc.).
+  ///
+  /// This is invoked automatically whenever the user clicks outside of any
+  /// [Webview] while a webview holds native focus. Calling it manually is
+  /// only needed when moving focus away from the webview programmatically.
+  static Future<void> releaseFocus() async {
+    try {
+      await _pluginChannel.invokeMethod('reclaimFocus');
+    } on Exception {
+      // The plugin is unavailable (e.g. running on a non-Windows host or in
+      // a widget test); there is no native focus to release in that case.
+    }
+  }
+
+  /// Creates an uninitialized controller. Call [initialize] before use.
+  WebviewController() : super(const WebviewValue.uninitialized());
+
+  Completer<void>? _creatingCompleter;
+  final Completer<void> _readyCompleter = Completer<void>();
   int _textureId = 0;
   bool _isDisposed = false;
 
-  Future<void> get ready => _creatingCompleter.future;
+  /// A future that completes once the controller has been initialized.
+  ///
+  /// It also completes when the controller is disposed before ever being
+  /// initialized, so awaiting it can never hang; check [value] afterwards.
+  Future<void> get ready => _readyCompleter.future;
 
   PermissionRequestedDelegate? _permissionRequested;
 
-  late MethodChannel _methodChannel;
-  late EventChannel _eventChannel;
-  StreamSubscription? _eventStreamSubscription;
+  MethodChannel? _methodChannel;
+  StreamSubscription<dynamic>? _eventStreamSubscription;
+
+  /// The per-instance method channel, available only after initialization.
+  MethodChannel get _channel {
+    final channel = _methodChannel;
+    if (channel == null) {
+      throw StateError(
+        'WebviewController is not initialized. Call initialize() first.',
+      );
+    }
+    return channel;
+  }
 
   final StreamController<String> _urlStreamController =
-      StreamController<String>();
+      StreamController<String>.broadcast();
 
   /// A stream reflecting the current URL.
   Stream<String> get url => _urlStreamController.stream;
@@ -127,37 +199,40 @@ class WebviewController extends ValueNotifier<WebviewValue> {
   final StreamController<LoadingState> _loadingStateStreamController =
       StreamController<LoadingState>.broadcast();
 
-  final StreamController<WebviewDownloadEvent> _downloadEventStreamController =
-      StreamController<WebviewDownloadEvent>.broadcast();
-
-  final StreamController<WebErrorStatus> _onLoadErrorStreamController =
-      StreamController<WebErrorStatus>();
-
   /// A stream reflecting the current loading state.
   Stream<LoadingState> get loadingState => _loadingStateStreamController.stream;
 
+  final StreamController<WebviewDownloadEvent> _downloadEventStreamController =
+      StreamController<WebviewDownloadEvent>.broadcast();
+
+  /// A stream of download lifecycle events (started, progress, completed).
   Stream<WebviewDownloadEvent> get onDownloadEvent =>
       _downloadEventStreamController.stream;
 
-  /// A stream reflecting the navigation error when navigation completed with an error.
+  final StreamController<WebErrorStatus> _onLoadErrorStreamController =
+      StreamController<WebErrorStatus>.broadcast();
+
+  /// A stream reflecting the navigation error when navigation completed with
+  /// an error.
   Stream<WebErrorStatus> get onLoadError => _onLoadErrorStreamController.stream;
 
   final StreamController<HistoryChanged> _historyChangedStreamController =
-      StreamController<HistoryChanged>();
+      StreamController<HistoryChanged>.broadcast();
 
   /// A stream reflecting the current history state.
   Stream<HistoryChanged> get historyChanged =>
       _historyChangedStreamController.stream;
 
   final StreamController<String> _securityStateChangedStreamController =
-      StreamController<String>();
+      StreamController<String>.broadcast();
 
-  /// A stream reflecting the current security state.
+  /// A stream reflecting the current security state as a JSON string
+  /// (Chrome DevTools Protocol `Security.securityStateChanged` payload).
   Stream<String> get securityStateChanged =>
       _securityStateChangedStreamController.stream;
 
   final StreamController<String> _titleStreamController =
-      StreamController<String>();
+      StreamController<String>.broadcast();
 
   /// A stream reflecting the current document title.
   Stream<String> get title => _titleStreamController.stream;
@@ -169,106 +244,167 @@ class WebviewController extends ValueNotifier<WebviewValue> {
   Stream<SystemMouseCursor> get _cursor => _cursorStreamController.stream;
 
   final StreamController<dynamic> _webMessageStreamController =
-      StreamController<dynamic>();
+      StreamController<dynamic>.broadcast();
 
+  /// A stream of JSON-decoded messages posted by the web content through
+  /// `window.chrome.webview.postMessage`.
+  ///
+  /// Emits an error event if a message is not valid JSON.
   Stream<dynamic> get webMessage => _webMessageStreamController.stream;
 
   final StreamController<bool>
-      _containsFullScreenElementChangedStreamController =
+  _containsFullScreenElementChangedStreamController =
       StreamController<bool>.broadcast();
 
-  /// A stream reflecting whether the document currently contains full-screen elements.
+  /// A stream reflecting whether the document currently contains full-screen
+  /// elements.
   Stream<bool> get containsFullScreenElementChanged =>
       _containsFullScreenElementChangedStreamController.stream;
 
-  WebviewController() : super(WebviewValue.uninitialized());
+  final StreamController<bool> _focusChangedStreamController =
+      StreamController<bool>.broadcast();
 
-  /// Initializes the underlying platform view.
-  Future<void> initialize() async {
+  /// A stream reflecting whether the underlying WebView2 control currently
+  /// holds native (Win32) keyboard focus.
+  Stream<bool> get onFocusChanged => _focusChangedStreamController.stream;
+
+  bool _hasNativeFocus = false;
+
+  /// Whether the underlying WebView2 control currently holds native (Win32)
+  /// keyboard focus.
+  bool get hasNativeFocus => _hasNativeFocus;
+
+  /// Initializes the underlying platform webview.
+  ///
+  /// Safe to call multiple times: concurrent calls join the in-flight
+  /// initialization and calling it on an initialized controller is a no-op.
+  /// If initialization fails, the returned future completes with the error
+  /// (typically a [PlatformException]) and a later retry is allowed.
+  ///
+  /// Throws a [StateError] if the controller has been disposed.
+  Future<void> initialize() {
     if (_isDisposed) {
+      throw StateError('WebviewController.initialize() called after dispose.');
+    }
+    if (value.isInitialized) {
       return Future<void>.value();
     }
-    _creatingCompleter = Completer<void>();
-    try {
-      final reply =
-          await _pluginChannel.invokeMapMethod<String, dynamic>('initialize');
+    // Join an in-flight initialization instead of racing a second native
+    // instance into existence.
+    final inFlight = _creatingCompleter;
+    if (inFlight != null) {
+      return inFlight.future;
+    }
+    final completer = _creatingCompleter = Completer<void>();
+    () async {
+      try {
+        final reply = await _pluginChannel.invokeMapMethod<String, dynamic>(
+          'initialize',
+        );
 
-      _textureId = reply!['textureId'];
-      _methodChannel = MethodChannel('$_pluginChannelPrefix/$_textureId');
-      _eventChannel = EventChannel('$_pluginChannelPrefix/$_textureId/events');
-      _eventStreamSubscription =
-          _eventChannel.receiveBroadcastStream().listen((event) {
-        final map = event as Map<dynamic, dynamic>;
-        switch (map['type']) {
-          case 'urlChanged':
-            _urlStreamController.add(map['value']);
-            break;
-          case 'onLoadError':
-            final value = WebErrorStatus.values[map['value']];
-            _onLoadErrorStreamController.add(value);
-            break;
-          case 'loadingStateChanged':
-            final value = LoadingState.values[map['value']];
-            _loadingStateStreamController.add(value);
-            break;
-          case 'downloadEvent':
-            final value = WebviewDownloadEvent(
-              WebviewDownloadEventKind.values[map['value']['kind']],
-              map['value']['url'],
-              map['value']['resultFilePath'],
-              map['value']['bytesReceived'],
-              map['value']['totalBytesToReceive'],
-            );
-            _downloadEventStreamController.add(value);
-            break;
-          case 'historyChanged':
-            final value = HistoryChanged(
-                map['value']['canGoBack'], map['value']['canGoForward']);
-            _historyChangedStreamController.add(value);
-            break;
-          case 'securityStateChanged':
-            _securityStateChangedStreamController.add(map['value']);
-            break;
-          case 'titleChanged':
-            _titleStreamController.add(map['value']);
-            break;
-          case 'cursorChanged':
-            _cursorStreamController.add(getCursorByName(map['value']));
-            break;
-          case 'webMessageReceived':
-            try {
-              final message = json.decode(map['value']);
-              _webMessageStreamController.add(message);
-            } catch (ex) {
-              _webMessageStreamController.addError(ex);
-            }
-            break;
-          case 'containsFullScreenElementChanged':
-            _containsFullScreenElementChangedStreamController.add(map['value']);
-            break;
+        _textureId = reply!['textureId'] as int;
+        final methodChannel = MethodChannel(
+          '$_pluginChannelPrefix/$_textureId',
+        );
+        final eventChannel = EventChannel(
+          '$_pluginChannelPrefix/$_textureId/events',
+        );
+        _methodChannel = methodChannel;
+        _eventStreamSubscription = eventChannel.receiveBroadcastStream().listen(
+          _handleEvent,
+        );
+        methodChannel.setMethodCallHandler(_handleMethodCall);
+
+        value = value.copyWith(isInitialized: true);
+        completer.complete();
+        if (!_readyCompleter.isCompleted) {
+          _readyCompleter.complete();
         }
-      });
+      } catch (error, stackTrace) {
+        // Allow a later retry; the failed attempt must not stay armed as the
+        // in-flight initialization forever.
+        _creatingCompleter = null;
+        completer.completeError(error, stackTrace);
+      }
+    }();
+    return completer.future;
+  }
 
-      _methodChannel.setMethodCallHandler((call) {
-        if (call.method == 'permissionRequested') {
-          return _onPermissionRequested(
-              call.arguments as Map<dynamic, dynamic>);
+  void _handleEvent(dynamic event) {
+    final map = event as Map<dynamic, dynamic>;
+    switch (map['type']) {
+      case 'urlChanged':
+        _urlStreamController.add(map['value']);
+        break;
+      case 'onLoadError':
+        // The native side forwards COREWEBVIEW2_WEB_ERROR_STATUS verbatim and
+        // the WebView2 runtime versions independently of this package, so a
+        // newer runtime may report a status this enum does not know yet.
+        final index = map['value'] as int;
+        final value = index >= 0 && index < WebErrorStatus.values.length
+            ? WebErrorStatus.values[index]
+            : WebErrorStatus.unknown;
+        _onLoadErrorStreamController.add(value);
+        break;
+      case 'loadingStateChanged':
+        final value = LoadingState.values[map['value']];
+        _loadingStateStreamController.add(value);
+        break;
+      case 'downloadEvent':
+        final value = WebviewDownloadEvent(
+          WebviewDownloadEventKind.values[map['value']['kind']],
+          map['value']['url'],
+          map['value']['resultFilePath'],
+          map['value']['bytesReceived'],
+          map['value']['totalBytesToReceive'],
+        );
+        _downloadEventStreamController.add(value);
+        break;
+      case 'historyChanged':
+        final value = HistoryChanged(
+          map['value']['canGoBack'],
+          map['value']['canGoForward'],
+        );
+        _historyChangedStreamController.add(value);
+        break;
+      case 'securityStateChanged':
+        _securityStateChangedStreamController.add(map['value']);
+        break;
+      case 'titleChanged':
+        _titleStreamController.add(map['value']);
+        break;
+      case 'cursorChanged':
+        _cursorStreamController.add(getCursorByName(map['value']));
+        break;
+      case 'webMessageReceived':
+        try {
+          final message = json.decode(map['value']);
+          _webMessageStreamController.add(message);
+        } catch (ex) {
+          _webMessageStreamController.addError(ex);
         }
+        break;
+      case 'containsFullScreenElementChanged':
+        _containsFullScreenElementChangedStreamController.add(map['value']);
+        break;
+      case 'focus':
+        _hasNativeFocus = map['value'] == true;
+        _focusChangedStreamController.add(_hasNativeFocus);
+        break;
+    }
+  }
 
-        throw MissingPluginException('Unknown method ${call.method}');
-      });
-
-      value = value.copyWith(isInitialized: true);
-      _creatingCompleter.complete();
-    } on PlatformException catch (e) {
-      _creatingCompleter.completeError(e);
+  Future<dynamic> _handleMethodCall(MethodCall call) {
+    if (call.method == 'permissionRequested') {
+      return _onPermissionRequested(call.arguments as Map<dynamic, dynamic>);
     }
 
-    return _creatingCompleter.future;
+    throw MissingPluginException('Unknown method ${call.method}');
   }
 
   Future<bool?> _onPermissionRequested(Map<dynamic, dynamic> args) async {
-    if (_permissionRequested == null) {
+    final delegate = _permissionRequested;
+    if (delegate == null) {
       return null;
     }
 
@@ -278,15 +414,14 @@ class WebviewController extends ValueNotifier<WebviewValue> {
 
     if (url != null && permissionKindIndex != null && isUserInitiated != null) {
       final permissionKind = WebviewPermissionKind.values[permissionKindIndex];
-      final decision =
-          await _permissionRequested!(url, permissionKind, isUserInitiated);
+      final decision = await delegate(url, permissionKind, isUserInitiated);
 
       switch (decision) {
         case WebviewPermissionDecision.allow:
           return true;
         case WebviewPermissionDecision.deny:
           return false;
-        default:
+        case WebviewPermissionDecision.none:
           return null;
       }
     }
@@ -294,14 +429,58 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     return null;
   }
 
+  /// Disposes the controller and the underlying native webview.
+  ///
+  /// Safe to call at any point in the lifecycle (before, during or after a
+  /// failed [initialize]) and idempotent. All event streams emit `done`.
   @override
   Future<void> dispose() async {
-    await _creatingCompleter.future;
-    if (!_isDisposed) {
-      _isDisposed = true;
-      await _eventStreamSubscription?.cancel();
-      await _pluginChannel.invokeMethod('dispose', _textureId);
+    if (_isDisposed) {
+      return;
     }
+    _isDisposed = true;
+
+    // Wait for an in-flight initialization to settle so a native instance
+    // created concurrently with dispose() cannot be orphaned.
+    try {
+      await _creatingCompleter?.future;
+    } catch (_) {
+      // Initialization failed; there is nothing native to dispose.
+    }
+
+    // Release anyone awaiting [ready]; they will see the disposed state.
+    if (!_readyCompleter.isCompleted) {
+      _readyCompleter.complete();
+    }
+
+    if (value.isInitialized) {
+      await _eventStreamSubscription?.cancel();
+      _methodChannel?.setMethodCallHandler(null);
+      try {
+        await _pluginChannel.invokeMethod('dispose', _textureId);
+      } on Exception {
+        // The native side is unavailable (e.g. non-Windows test host).
+      }
+    }
+
+    // Close every stream controller so active listeners receive `done` and
+    // the controllers can be garbage collected.
+    for (final controller in <StreamController<dynamic>>[
+      _urlStreamController,
+      _loadingStateStreamController,
+      _downloadEventStreamController,
+      _onLoadErrorStreamController,
+      _historyChangedStreamController,
+      _securityStateChangedStreamController,
+      _titleStreamController,
+      _cursorStreamController,
+      _webMessageStreamController,
+      _containsFullScreenElementChangedStreamController,
+      _focusChangedStreamController,
+    ]) {
+      unawaited(controller.close());
+    }
+
     super.dispose();
   }
 
@@ -310,8 +489,7 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('loadUrl', url);
+    return _channel.invokeMethod('loadUrl', url);
   }
 
   /// Loads a document from the given string.
@@ -319,8 +497,7 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('loadStringContent', content);
+    return _channel.invokeMethod('loadStringContent', content);
   }
 
   /// Reloads the current document.
@@ -328,8 +505,7 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('reload');
+    return _channel.invokeMethod('reload');
   }
 
   /// Stops all navigations and pending resource fetches.
@@ -337,78 +513,79 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('stop');
+    return _channel.invokeMethod('stop');
   }
 
-  /// Navigates the WebView to the previous page in the navigation history.
+  /// Navigates the webview to the previous page in the navigation history.
   Future<void> goBack() async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('goBack');
+    return _channel.invokeMethod('goBack');
   }
 
-  /// Navigates the WebView to the next page in the navigation history.
+  /// Navigates the webview to the next page in the navigation history.
   Future<void> goForward() async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('goForward');
+    return _channel.invokeMethod('goForward');
   }
 
-  /// Adds the provided JavaScript [script] to a list of scripts that should be run after the global
-  /// object has been created, but before the HTML document has been parsed and before any
-  /// other script included by the HTML document is run.
+  /// Adds the provided JavaScript [script] to a list of scripts that should
+  /// be run after the global object has been created, but before the HTML
+  /// document has been parsed and before any other script included by the
+  /// HTML document is run.
   ///
-  /// Returns a [ScriptID] on success which can be used for [removeScriptToExecuteOnDocumentCreated].
+  /// Returns a [ScriptID] on success which can be used for
+  /// [removeScriptToExecuteOnDocumentCreated].
   ///
-  /// see https://docs.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2?view=webview2-1.0.1264.42#addscripttoexecuteondocumentcreated
+  /// See [the WebView2 documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#addscripttoexecuteondocumentcreated).
   Future<ScriptID?> addScriptToExecuteOnDocumentCreated(String script) async {
     if (_isDisposed) {
       return null;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod<String?>(
-        'addScriptToExecuteOnDocumentCreated', script);
+    return _channel.invokeMethod<String?>(
+      'addScriptToExecuteOnDocumentCreated',
+      script,
+    );
   }
 
-  /// Removes the script identified by [scriptId] from the list of registered scripts.
+  /// Removes the script identified by [scriptId] from the list of registered
+  /// scripts.
   ///
-  /// see https://docs.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2?view=webview2-1.0.1264.42#removescripttoexecuteondocumentcreated
+  /// See [the WebView2 documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#removescripttoexecuteondocumentcreated).
   Future<void> removeScriptToExecuteOnDocumentCreated(ScriptID scriptId) async {
-    if (_isDisposed) {
-      return null;
-    }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod(
-        'removeScriptToExecuteOnDocumentCreated', scriptId);
-  }
-
-  /// Runs the JavaScript [script] in the current top-level document rendered in
-  /// the WebView and returns its result.
-  ///
-  /// see https://docs.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2?view=webview2-1.0.1264.42#executescript
-  Future<dynamic> executeScript(String script) async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
+    return _channel.invokeMethod(
+      'removeScriptToExecuteOnDocumentCreated',
+      scriptId,
+    );
+  }
 
-    final data = await _methodChannel.invokeMethod('executeScript', script);
-    if (data == null) return null;
+  /// Runs the JavaScript [script] in the current top-level document rendered
+  /// in the webview and returns its JSON-decoded result.
+  ///
+  /// See [the WebView2 documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#executescript).
+  Future<dynamic> executeScript(String script) async {
+    if (_isDisposed) {
+      return null;
+    }
+    final data = await _channel.invokeMethod('executeScript', script);
+    if (data == null) {
+      return null;
+    }
     return jsonDecode(data as String);
   }
 
-  /// Posts the given JSON-formatted message to the current document.
+  /// Posts the given JSON-formatted [message] to the current document.
   Future<void> postWebMessage(String message) async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('postWebMessage', message);
+    return _channel.invokeMethod('postWebMessage', message);
   }
 
   /// Sets the user agent value.
@@ -416,8 +593,7 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setUserAgent', userAgent);
+    return _channel.invokeMethod('setUserAgent', userAgent);
   }
 
   /// Clears browser cookies.
@@ -425,35 +601,32 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('clearCookies');
+    return _channel.invokeMethod('clearCookies');
   }
 
-  /// Clears browser cache.
+  /// Clears the browser cache.
   Future<void> clearCache() async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('clearCache');
+    return _channel.invokeMethod('clearCache');
   }
 
-  /// Toggles ignoring cache for each request. If true, cache will not be used.
+  /// Toggles ignoring cache for each request. If [disabled] is `true`, the
+  /// cache will not be used.
   Future<void> setCacheDisabled(bool disabled) async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setCacheDisabled', disabled);
+    return _channel.invokeMethod('setCacheDisabled', disabled);
   }
 
-  /// Opens the Browser DevTools in a separate window
+  /// Opens the browser DevTools in a separate window.
   Future<void> openDevTools() async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('openDevTools');
+    return _channel.invokeMethod('openDevTools');
   }
 
   /// Sets the background color to the provided [color].
@@ -465,9 +638,8 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod(
-        'setBackgroundColor', color.value.toSigned(32));
+    final argb = color.toARGB32().toSigned(32);
+    return _channel.invokeMethod('setBackgroundColor', argb);
   }
 
   /// Sets the zoom factor.
@@ -475,84 +647,107 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setZoomFactor', zoomFactor);
+    return _channel.invokeMethod('setZoomFactor', zoomFactor);
   }
 
   /// Sets the [WebviewPopupWindowPolicy].
   Future<void> setPopupWindowPolicy(
-      WebviewPopupWindowPolicy popupPolicy) async {
+    WebviewPopupWindowPolicy popupPolicy,
+  ) async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod(
-        'setPopupWindowPolicy', popupPolicy.index);
+    return _channel.invokeMethod('setPopupWindowPolicy', popupPolicy.index);
   }
 
-  /// Suspends the web view.
+  /// Suspends the webview to reduce its resource usage.
+  ///
+  /// See [the WebView2 documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3#trysuspend).
   Future<void> suspend() async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('suspend');
+    return _channel.invokeMethod('suspend');
   }
 
-  /// Resumes the web view.
+  /// Resumes a webview suspended with [suspend].
   Future<void> resume() async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('resume');
+    return _channel.invokeMethod('resume');
   }
 
-  /// Adds a Virtual Host Name Mapping.
+  /// Gives the webview native (Win32) keyboard focus.
   ///
-  /// Please refer to
-  /// [Microsofts](https://docs.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3#setvirtualhostnametofoldermapping)
-  /// documentation for more details.
-  Future<void> addVirtualHostNameMapping(String hostName, String folderPath,
-      WebviewHostResourceAccessKind accessKind) async {
+  /// This allows the user to type into the web content without having to
+  /// click into it first. Clicking into the webview moves native focus to it
+  /// automatically; this method exists for programmatic focus handoff.
+  Future<void> focus() async {
     if (_isDisposed) {
       return;
     }
-
-    return _methodChannel.invokeMethod(
-        'setVirtualHostNameMapping', [hostName, folderPath, accessKind.index]);
+    return _channel.invokeMethod('moveFocus');
   }
 
-  /// Removes a Virtual Host Name Mapping.
+  /// Adds a virtual host name mapping, making the directory at [folderPath]
+  /// available to web content under `https://<hostName>/`.
   ///
-  /// Please refer to
-  /// [Microsofts](https://docs.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3#clearvirtualhostnametofoldermapping)
-  /// documentation for more details.
+  /// See [the WebView2 documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3#setvirtualhostnametofoldermapping).
+  Future<void> addVirtualHostNameMapping(
+    String hostName,
+    String folderPath,
+    WebviewHostResourceAccessKind accessKind,
+  ) async {
+    if (_isDisposed) {
+      return;
+    }
+    return _channel.invokeMethod('setVirtualHostNameMapping', [
+      hostName,
+      folderPath,
+      accessKind.index,
+    ]);
+  }
+
+  /// Removes a virtual host name mapping added with
+  /// [addVirtualHostNameMapping].
+  ///
+  /// See [the WebView2 documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3#clearvirtualhostnametofoldermapping).
   Future<void> removeVirtualHostNameMapping(String hostName) async {
     if (_isDisposed) {
       return;
     }
-    return _methodChannel.invokeMethod('clearVirtualHostNameMapping', hostName);
+    return _channel.invokeMethod('clearVirtualHostNameMapping', hostName);
   }
 
-  /// Limits the number of frames per second to the given value.
+  /// Limits the number of frames per second to the given value, or removes
+  /// the limit when [maxFps] is 0 or null.
   Future<void> setFpsLimit([int? maxFps = 0]) async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setFpsLimit', maxFps);
+    return _channel.invokeMethod('setFpsLimit', maxFps);
   }
 
-  /// Sends a Pointer (Touch) update
-  Future<void> _setPointerUpdate(WebviewPointerEventKind kind, int pointer,
-      Offset position, double size, double pressure) async {
+  /// Sends a pointer (touch) update.
+  Future<void> _setPointerUpdate(
+    WebviewPointerEventKind kind,
+    int pointer,
+    Offset position,
+    double size,
+    double pressure,
+  ) async {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setPointerUpdate',
-        [pointer, kind.index, position.dx, position.dy, size, pressure]);
+    return _channel.invokeMethod('setPointerUpdate', [
+      pointer,
+      kind.index,
+      position.dx,
+      position.dy,
+      size,
+      pressure,
+    ]);
   }
 
   /// Moves the virtual cursor to [position].
@@ -560,9 +755,7 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel
-        .invokeMethod('setCursorPos', [position.dx, position.dy]);
+    return _channel.invokeMethod('setCursorPos', [position.dx, position.dy]);
   }
 
   /// Indicates whether the specified [button] is currently down.
@@ -570,9 +763,10 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setPointerButton',
-        <String, dynamic>{'button': button.index, 'isDown': isDown});
+    return _channel.invokeMethod('setPointerButton', <String, dynamic>{
+      'button': button.index,
+      'isDown': isDown,
+    });
   }
 
   /// Sets the horizontal and vertical scroll delta.
@@ -580,8 +774,7 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel.invokeMethod('setScrollDelta', [dx, dy]);
+    return _channel.invokeMethod('setScrollDelta', [dx, dy]);
   }
 
   /// Sets the surface size to the provided [size].
@@ -589,16 +782,31 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     if (_isDisposed) {
       return;
     }
-    assert(value.isInitialized);
-    return _methodChannel
-        .invokeMethod('setSize', [size.width, size.height, scaleFactor]);
+    return _channel.invokeMethod('setSize', [
+      size.width,
+      size.height,
+      scaleFactor,
+    ]);
   }
 }
 
+/// Embeds the web content rendered by a [WebviewController] into the widget
+/// tree and forwards pointer input to it.
+///
+/// The [controller] must be initialized before the webview becomes visible;
+/// until then this widget reserves its layout space.
 class Webview extends StatefulWidget {
+  /// The controller backing this webview.
   final WebviewController controller;
+
+  /// Invoked when the web content requests a browser permission.
   final PermissionRequestedDelegate? permissionRequested;
+
+  /// An optional fixed width. When both [width] and [height] are given the
+  /// webview uses that exact size, otherwise it expands.
   final double? width;
+
+  /// An optional fixed height. See [width].
   final double? height;
 
   /// An optional scale factor. Defaults to [FlutterView.devicePixelRatio] for
@@ -613,15 +821,19 @@ class Webview extends StatefulWidget {
   /// unless specifying a [scaleFactor].
   final FilterQuality filterQuality;
 
-  const Webview(this.controller,
-      {this.width,
-      this.height,
-      this.permissionRequested,
-      this.scaleFactor,
-      this.filterQuality = FilterQuality.none});
+  /// Creates a webview widget backed by [controller].
+  const Webview(
+    this.controller, {
+    super.key,
+    this.width,
+    this.height,
+    this.permissionRequested,
+    this.scaleFactor,
+    this.filterQuality = FilterQuality.none,
+  });
 
   @override
-  _WebviewState createState() => _WebviewState();
+  State<Webview> createState() => _WebviewState();
 }
 
 class _WebviewState extends State<Webview> {
@@ -634,14 +846,12 @@ class _WebviewState extends State<Webview> {
 
   WebviewController get _controller => widget.controller;
 
-  StreamSubscription? _cursorSubscription;
+  StreamSubscription<SystemMouseCursor>? _cursorSubscription;
 
   @override
   void initState() {
     super.initState();
 
-    // TODO: Refactor callback and event handling and
-    // remove this line
     _controller._permissionRequested = widget.permissionRequested;
 
     // Report initial surface size
@@ -652,6 +862,8 @@ class _WebviewState extends State<Webview> {
         _cursor = cursor;
       });
     });
+
+    _WebviewFocusCoordinator.register(this);
   }
 
   @override
@@ -661,114 +873,213 @@ class _WebviewState extends State<Webview> {
             key: _key,
             width: widget.width,
             height: widget.height,
-            child: _buildInner())
+            child: _buildInner(),
+          )
         : SizedBox.expand(key: _key, child: _buildInner());
   }
 
   Widget _buildInner() {
     return NotificationListener<SizeChangedLayoutNotification>(
-        onNotification: (notification) {
-          _reportSurfaceSize();
-          return true;
-        },
-        child: SizeChangedLayoutNotifier(
-            child: _controller.value.isInitialized
-                ? Listener(
-                    onPointerHover: (ev) {
-                      // ev.kind is for whatever reason not set to touch
-                      // even on touch input
-                      if (_pointerKind == PointerDeviceKind.touch) {
-                        // Ignoring hover events on touch for now
-                        return;
-                      }
-                      _controller._setCursorPos(ev.localPosition);
-                    },
-                    onPointerDown: (ev) {
-                      _pointerKind = ev.kind;
-                      if (ev.kind == PointerDeviceKind.touch) {
-                        _controller._setPointerUpdate(
-                            WebviewPointerEventKind.down,
-                            ev.pointer,
-                            ev.localPosition,
-                            ev.size,
-                            ev.pressure);
-                        return;
-                      }
-                      final button = getButton(ev.buttons);
-                      _downButtons[ev.pointer] = button;
-                      _controller._setPointerButtonState(button, true);
-                    },
-                    onPointerUp: (ev) {
-                      _pointerKind = ev.kind;
-                      if (ev.kind == PointerDeviceKind.touch) {
-                        _controller._setPointerUpdate(
-                            WebviewPointerEventKind.up,
-                            ev.pointer,
-                            ev.localPosition,
-                            ev.size,
-                            ev.pressure);
-                        return;
-                      }
-                      final button = _downButtons.remove(ev.pointer);
-                      if (button != null) {
-                        _controller._setPointerButtonState(button, false);
-                      }
-                    },
-                    onPointerCancel: (ev) {
-                      _pointerKind = ev.kind;
-                      final button = _downButtons.remove(ev.pointer);
-                      if (button != null) {
-                        _controller._setPointerButtonState(button, false);
-                      }
-                    },
-                    onPointerMove: (ev) {
-                      _pointerKind = ev.kind;
-                      if (ev.kind == PointerDeviceKind.touch) {
-                        _controller._setPointerUpdate(
-                            WebviewPointerEventKind.update,
-                            ev.pointer,
-                            ev.localPosition,
-                            ev.size,
-                            ev.pressure);
-                      } else {
-                        _controller._setCursorPos(ev.localPosition);
-                      }
-                    },
-                    onPointerSignal: (signal) {
-                      if (signal is PointerScrollEvent) {
-                        _controller._setScrollDelta(
-                            -signal.scrollDelta.dx, -signal.scrollDelta.dy);
-                      }
-                    },
-                    onPointerPanZoomUpdate: (signal) {
-                      if (signal.panDelta.dx.abs() > signal.panDelta.dy.abs()) {
-                        _controller._setScrollDelta(-signal.panDelta.dx, 0);
-                      } else {
-                        _controller._setScrollDelta(0, signal.panDelta.dy);
-                      }
-                    },
-                    child: MouseRegion(
-                        cursor: _cursor,
-                        child: Texture(
-                          textureId: _controller._textureId,
-                          filterQuality: widget.filterQuality,
-                        )),
-                  )
-                : const SizedBox()));
+      onNotification: (notification) {
+        _reportSurfaceSize();
+        return true;
+      },
+      child: SizeChangedLayoutNotifier(
+        child: _controller.value.isInitialized
+            ? Listener(
+                onPointerHover: (ev) {
+                  // ev.kind is for whatever reason not set to touch
+                  // even on touch input
+                  if (_pointerKind == PointerDeviceKind.touch) {
+                    // Ignoring hover events on touch for now
+                    return;
+                  }
+                  _controller._setCursorPos(ev.localPosition);
+                },
+                onPointerDown: (ev) {
+                  // Claim this pointer so the global focus route knows the
+                  // press actually reached web content (honoring hit
+                  // testing and any widgets painted over the webview).
+                  _WebviewFocusCoordinator.claimPointer(ev.pointer);
+                  _pointerKind = ev.kind;
+                  if (ev.kind == PointerDeviceKind.touch) {
+                    _controller._setPointerUpdate(
+                      WebviewPointerEventKind.down,
+                      ev.pointer,
+                      ev.localPosition,
+                      ev.size,
+                      ev.pressure,
+                    );
+                    return;
+                  }
+                  // Make WebView2 see the cursor at the exact press
+                  // location before the button event; a preceding hover may
+                  // have been elsewhere or skipped entirely.
+                  _controller._setCursorPos(ev.localPosition);
+                  final button = _getButton(ev.buttons);
+                  _downButtons[ev.pointer] = button;
+                  _controller._setPointerButtonState(button, true);
+                },
+                onPointerUp: (ev) {
+                  _pointerKind = ev.kind;
+                  if (ev.kind == PointerDeviceKind.touch) {
+                    _controller._setPointerUpdate(
+                      WebviewPointerEventKind.up,
+                      ev.pointer,
+                      ev.localPosition,
+                      ev.size,
+                      ev.pressure,
+                    );
+                    return;
+                  }
+                  final button = _downButtons.remove(ev.pointer);
+                  if (button != null) {
+                    _controller._setPointerButtonState(button, false);
+                  }
+                },
+                onPointerCancel: (ev) {
+                  _pointerKind = ev.kind;
+                  final button = _downButtons.remove(ev.pointer);
+                  if (button != null) {
+                    _controller._setPointerButtonState(button, false);
+                  }
+                },
+                onPointerMove: (ev) {
+                  _pointerKind = ev.kind;
+                  if (ev.kind == PointerDeviceKind.touch) {
+                    _controller._setPointerUpdate(
+                      WebviewPointerEventKind.update,
+                      ev.pointer,
+                      ev.localPosition,
+                      ev.size,
+                      ev.pressure,
+                    );
+                  } else {
+                    _controller._setCursorPos(ev.localPosition);
+                  }
+                },
+                onPointerSignal: (signal) {
+                  if (signal is PointerScrollEvent) {
+                    _controller._setScrollDelta(
+                      -signal.scrollDelta.dx,
+                      -signal.scrollDelta.dy,
+                    );
+                  }
+                },
+                onPointerPanZoomUpdate: (signal) {
+                  if (signal.panDelta.dx.abs() > signal.panDelta.dy.abs()) {
+                    _controller._setScrollDelta(-signal.panDelta.dx, 0);
+                  } else {
+                    _controller._setScrollDelta(0, signal.panDelta.dy);
+                  }
+                },
+                child: MouseRegion(
+                  cursor: _cursor,
+                  child: Texture(
+                    textureId: _controller._textureId,
+                    filterQuality: widget.filterQuality,
+                  ),
+                ),
+              )
+            : const SizedBox(),
+      ),
+    );
   }
 
   void _reportSurfaceSize() async {
     final box = _key.currentContext?.findRenderObject() as RenderBox?;
-    if (box != null) {
-      await _controller.ready;
-      unawaited(_controller._setSize(
-          box.size, widget.scaleFactor ?? window.devicePixelRatio));
+    if (box == null) {
+      return;
     }
+    // Resolve the device pixel ratio from this view (multi-window safe) before
+    // the async gap, so BuildContext is never used after an `await`.
+    final devicePixelRatio =
+        widget.scaleFactor ?? View.of(context).devicePixelRatio;
+    await _controller.ready;
+    if (!mounted || !_controller.value.isInitialized) {
+      return;
+    }
+    unawaited(_controller._setSize(box.size, devicePixelRatio));
   }
 
   @override
   void dispose() {
-    super.dispose();
+    _WebviewFocusCoordinator.unregister(this);
     _cursorSubscription?.cancel();
+    super.dispose();
+  }
+}
+
+/// Coordinates Win32 keyboard focus between Flutter and all live [Webview]s.
+///
+/// WebView2's composition (offscreen) hosting has no keyboard injection API,
+/// so the browser takes real Win32 focus whenever a forwarded click lands in
+/// web content. Without coordination, a later click on Flutter UI would leave
+/// native focus with the webview and Flutter would not receive keyboard
+/// events again until the window is re-activated.
+///
+/// Coordination works by having each [Webview]'s own [Listener] claim the
+/// pointer when a press reaches it. Flutter dispatches hit-test targets before
+/// global pointer routes for the same event, so by the time
+/// [_handlePointerEvent] runs it can tell whether the press truly landed on
+/// web content:
+/// - Claimed pointer: the forwarded mouse input lets WebView2 take focus by
+///   itself; nothing to do.
+/// - Unclaimed pointer while a webview holds native focus: focus is handed
+///   back to the Flutter view via [WebviewController.releaseFocus].
+///
+/// Using the claim instead of a geometric bounds check means the handover
+/// honors hit testing, widgets painted on top of a webview, and render
+/// transforms - all of which a rectangle test would get wrong.
+class _WebviewFocusCoordinator {
+  static final Set<_WebviewState> _instances = <_WebviewState>{};
+  static final Set<int> _claimedPointers = <int>{};
+  static bool _routeInstalled = false;
+
+  static void register(_WebviewState state) {
+    _instances.add(state);
+    if (!_routeInstalled) {
+      _routeInstalled = true;
+      GestureBinding.instance.pointerRouter.addGlobalRoute(_handlePointerEvent);
+    }
+  }
+
+  static void unregister(_WebviewState state) {
+    _instances.remove(state);
+    if (_instances.isEmpty && _routeInstalled) {
+      _routeInstalled = false;
+      _claimedPointers.clear();
+      GestureBinding.instance.pointerRouter.removeGlobalRoute(
+        _handlePointerEvent,
+      );
+    }
+  }
+
+  /// Records that a pointer-down landed on a live [Webview]. Called from the
+  /// webview's own [Listener.onPointerDown], which runs before the global
+  /// route below for the same event.
+  static void claimPointer(int pointer) {
+    _claimedPointers.add(pointer);
+  }
+
+  static void _handlePointerEvent(PointerEvent event) {
+    if (event is! PointerDownEvent) {
+      return;
+    }
+
+    if (_claimedPointers.remove(event.pointer)) {
+      // The press reached a webview; WebView2 manages its own focus via the
+      // forwarded mouse input.
+      return;
+    }
+
+    for (final state in _instances) {
+      if (state._controller._hasNativeFocus) {
+        // The press landed outside every webview while one still holds native
+        // focus; return Win32 keyboard focus to the Flutter view.
+        unawaited(WebviewController.releaseFocus());
+        return;
+      }
+    }
   }
 }
