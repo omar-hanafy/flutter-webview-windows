@@ -56,7 +56,9 @@ TEST_F(CursorUtilTest, MapsSharedHandlesToOneOfTheirSynonyms) {
 }
 
 TEST_F(CursorUtilTest, FallsBackToBasicForUnknownHandle) {
-  EXPECT_EQ(GetCursorName(reinterpret_cast<HCURSOR>(0xDEADBEEF)), "basic");
+  EXPECT_EQ(GetCursorName(reinterpret_cast<HCURSOR>(
+                static_cast<uintptr_t>(0xDEADBEEF))),
+            "basic");
 }
 
 TEST_F(CursorUtilTest, FallsBackToBasicForNullHandle) {
