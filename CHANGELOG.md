@@ -1,9 +1,11 @@
-## 0.5.0
+## 1.0.0
 
-First release of this fork. Everything below ships as one version on top of
-upstream `0.4.0` (including all upstream changes up to `ed81bbe`: scroll
-fixes, HTML `select` fix, CMake modernization). The two headline areas are
-the window focus fix tracked in
+First release of this fork, and the first stable major: the API surface
+below is the maintained baseline going forward, and any future breaking
+change will be a major version bump. Everything below ships as one version
+on top of upstream `0.4.0` (including all upstream changes up to `ed81bbe`:
+scroll fixes, HTML `select` fix, CMake modernization). The two headline
+areas are the window focus fix tracked in
 [jnschulze/flutter-webview-windows#230](https://github.com/jnschulze/flutter-webview-windows/issues/230)
 and a full 2026 modernization.
 
