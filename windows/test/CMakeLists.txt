@@ -43,8 +43,11 @@ add_executable(webview_windows_unittests
 )
 
 target_compile_features(webview_windows_unittests PRIVATE cxx_std_23)
+# Mirror the defines the plugin itself builds with (Flutter's
+# apply_standard_settings). Deliberately no WIN32_LEAN_AND_MEAN: the
+# MIDL-generated WebView2.h needs the COM base headers from <windows.h>.
 target_compile_definitions(webview_windows_unittests PRIVATE
-  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
+  UNICODE _UNICODE NOMINMAX
 )
 
 target_include_directories(webview_windows_unittests PRIVATE
