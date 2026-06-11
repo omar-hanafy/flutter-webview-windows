@@ -1,3 +1,91 @@
+## 1.0.0
+
+First stable release of this fork
+([omar-hanafy/flutter-webview-windows](https://github.com/omar-hanafy/flutter-webview-windows)),
+built on top of upstream `0.4.0` and including all upstream changes up to
+`ed81bbe`. This API is the maintained baseline going forward: any future
+breaking change will come with a major version bump.
+
+This release contains **breaking changes**. See the
+[migration guide](https://github.com/omar-hanafy/flutter-webview-windows/blob/main/migration_guide.md)
+for step-by-step upgrade instructions.
+
+### Breaking changes
+
+* Requires Dart 3.12+ / Flutter 3.44+.
+* All `WebviewController` event streams are now broadcast streams: multiple
+  listeners are allowed, and events emitted while nobody listens are dropped.
+* `WebErrorStatus` values are renamed to lowerCamelCase
+  (`WebErrorStatusTimeout` -> `WebErrorStatus.timeout`); the underlying
+  indexes are unchanged.
+* Calling controller methods before `initialize()` completes now throws a
+  `StateError` with an actionable message instead of crashing in release
+  builds.
+* `initialize()` throws a `StateError` when called on a disposed controller,
+  and completes with the underlying error on any failure (previously some
+  failures left the controller, `ready`, and `dispose()` hanging forever).
+* The internal `getButton` helper is no longer exported.
+
+### Window focus
+
+Fixes the long-standing focus loss issue
+([jnschulze/flutter-webview-windows#230](https://github.com/jnschulze/flutter-webview-windows/issues/230)):
+
+* Clicking a webview no longer deactivates the host window (gray title bar,
+  dead keyboard shortcuts).
+* Clicking Flutter UI outside a webview hands keyboard focus back to Flutter
+  automatically, and pressing `Tab` past the page's last focusable element
+  moves focus back to Flutter instead of cycling inside the page forever.
+* New API: `WebviewController.focus()`, `WebviewController.releaseFocus()`,
+  the `onFocusChanged` stream, and `hasNativeFocus`.
+
+### Improvements
+
+* `initialize()` is re-entrant: concurrent calls join the in-flight attempt,
+  and a failed attempt can be retried.
+* `dispose()` is idempotent, safe in every lifecycle state, and closes all
+  event streams.
+* Load-error statuses reported by a newer WebView2 runtime than this package
+  knows map to `WebErrorStatus.unknown` instead of throwing a `RangeError`.
+* The `Webview` widget accepts a `key` and resolves its device pixel ratio
+  per view (multi-window safe).
+* Full dartdoc coverage of the public API.
+
+### Native fixes
+
+* Fixed inverted success reporting for `addVirtualHostNameMapping` /
+  `removeVirtualHostNameMapping` (success was reported as failure).
+* Fixed `dispose` silently leaking the native webview instance for texture
+  ids that fit in 32 bits.
+* Fixed COM reference leaks and latent use-after-frees in touch pointer
+  events, permission requests, environment creation, WinRT factory access,
+  and native string getters.
+* Non-ASCII `additionalArguments` now reach Chromium as proper UTF-8 instead
+  of being mangled.
+* Malformed method channel arguments produce an error result instead of
+  terminating the process, and all nullable native strings are converted
+  null-safely.
+* Webview creation failures are surfaced as errors instead of returning a
+  silent, dead instance.
+
+### Toolchain
+
+* WebView2 SDK `1.0.1210.39` -> `1.0.3967.48`, WIL `1.0.220914.1` ->
+  `1.0.260126.7`.
+* The plugin builds as C++23 and no longer forces a C++ language level onto
+  the consuming app; the CMake minimum is 3.20.
+* The NuGet bootstrap is SHA-256 verified and dependencies are installed at
+  configure time, so first builds no longer race the imported `.targets`.
+
+### Tests
+
+* New Dart test suite pinning the channel contract of every controller
+  method, the controller lifecycle, all event types, widget input forwarding,
+  and focus coordination.
+* New native C++ unit tests (GoogleTest), run on `windows-latest` in CI.
+* Enum wire formats are pinned twice (native `static_assert`s and Dart
+  contract tests) so the two sides cannot drift apart silently.
+
 ## 0.4.0
 
 * Enable MSVC coroutine support ([#278](https://github.com/jnschulze/flutter-webview-windows/pull/278))

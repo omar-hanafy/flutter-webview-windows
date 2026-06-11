@@ -1,72 +1,204 @@
-/// Loading state
+/// The document loading state.
 // Order must match WebviewLoadingState (see webview.h)
-enum LoadingState { none, loading, navigationCompleted }
+enum LoadingState {
+  /// No document is loaded.
+  none,
 
-/// Pointer button type
-// Order must match WebviewPointerButton (see webview.h)
-enum PointerButton { none, primary, secondary, tertiary }
+  /// A document is loading.
+  loading,
 
-enum WebviewDownloadEventKind {
-  downloadStarted,
-  downloadCompleted,
-  downloadProgress
+  /// Navigation has completed.
+  navigationCompleted,
 }
 
-/// Pointer Event kind
-// Order must match WebviewPointerEventKind (see webview.h)
-enum WebviewPointerEventKind { activate, down, enter, leave, up, update }
+/// A pointer button.
+// Order must match WebviewPointerButton (see webview.h)
+enum PointerButton {
+  /// No button.
+  none,
 
-/// Permission kind
+  /// The primary (usually left) mouse button.
+  primary,
+
+  /// The secondary (usually right) mouse button.
+  secondary,
+
+  /// The tertiary (middle) mouse button.
+  tertiary,
+}
+
+/// The kind of a [WebviewDownloadEvent].
+enum WebviewDownloadEventKind {
+  /// A download has started.
+  downloadStarted,
+
+  /// A download has completed.
+  downloadCompleted,
+
+  /// A download made progress.
+  downloadProgress,
+}
+
+/// The kind of a forwarded pointer event.
+// Order must match WebviewPointerEventKind (see webview.h)
+enum WebviewPointerEventKind {
+  /// The pointer activated the window.
+  activate,
+
+  /// The pointer made contact.
+  down,
+
+  /// The pointer entered the surface.
+  enter,
+
+  /// The pointer left the surface.
+  leave,
+
+  /// The pointer contact lifted.
+  up,
+
+  /// The pointer moved or its properties changed.
+  update,
+}
+
+/// The kind of a browser permission request.
 // Order must match WebviewPermissionKind (see webview.h)
 enum WebviewPermissionKind {
+  /// An unknown permission.
   unknown,
+
+  /// Microphone access.
   microphone,
+
+  /// Camera access.
   camera,
+
+  /// Geolocation access.
   geoLocation,
+
+  /// Web notifications.
   notifications,
+
+  /// Generic sensor access.
   otherSensors,
-  clipboardRead
+
+  /// Clipboard read access.
+  clipboardRead,
 }
 
-enum WebviewPermissionDecision { none, allow, deny }
+/// The reply to a browser permission request.
+enum WebviewPermissionDecision {
+  /// Defer to the WebView2 default behavior.
+  none,
+
+  /// Grant the permission.
+  allow,
+
+  /// Deny the permission.
+  deny,
+}
 
 /// The policy for popup requests.
 ///
 /// [allow] allows popups and will create new windows.
 /// [deny] suppresses popups.
 /// [sameWindow] displays popup contents in the current WebView.
-enum WebviewPopupWindowPolicy { allow, deny, sameWindow }
+enum WebviewPopupWindowPolicy {
+  /// Allow popups in new windows.
+  allow,
 
-/// The kind of cross origin resource access for virtual hosts
+  /// Suppress popups.
+  deny,
+
+  /// Display popup contents in the current webview.
+  sameWindow,
+}
+
+/// The kind of cross origin resource access allowed for host resources of a
+/// virtual host mapping.
 ///
 /// [deny] all cross origin requests are denied.
 /// [allow] all cross origin requests are allowed.
-/// [denyCors] sub resource cross origin requests are allowed, otherwise denied.
+/// [denyCors] sub resource cross origin requests are allowed, otherwise
+/// denied.
 ///
 /// For more detailed information, please refer to
-/// [Microsofts](https://docs.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#corewebview2_host_resource_access_kind)
-/// documentation.
+/// [Microsoft's documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#corewebview2_host_resource_access_kind).
 // Order must match WebviewHostResourceAccessKind (see webview.h)
-enum WebviewHostResourceAccessKind { deny, allow, denyCors }
+enum WebviewHostResourceAccessKind {
+  /// All cross origin resource access is denied.
+  deny,
 
+  /// All cross origin resource access is allowed.
+  allow,
+
+  /// Cross origin resource access is allowed for sub resources, denied
+  /// otherwise.
+  denyCors,
+}
+
+/// The error status of a failed navigation, reported on
+/// [WebviewController.onLoadError].
+///
+/// Mirrors `COREWEBVIEW2_WEB_ERROR_STATUS`; see
+/// [Microsoft's documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#corewebview2_web_error_status).
+// Order must match COREWEBVIEW2_WEB_ERROR_STATUS (the native value is used as
+// an index into this enum).
 enum WebErrorStatus {
-  WebErrorStatusUnknown,
-  WebErrorStatusCertificateCommonNameIsIncorrect,
-  WebErrorStatusCertificateExpired,
-  WebErrorStatusClientCertificateContainsErrors,
-  WebErrorStatusCertificateRevoked,
-  WebErrorStatusCertificateIsInvalid,
-  WebErrorStatusServerUnreachable,
-  WebErrorStatusTimeout,
-  WebErrorStatusErrorHTTPInvalidServerResponse,
-  WebErrorStatusConnectionAborted,
-  WebErrorStatusConnectionReset,
-  WebErrorStatusDisconnected,
-  WebErrorStatusCannotConnect,
-  WebErrorStatusHostNameNotResolved,
-  WebErrorStatusOperationCanceled,
-  WebErrorStatusRedirectFailed,
-  WebErrorStatusUnexpectedError,
-  WebErrorStatusValidAuthenticationCredentialsRequired,
-  WebErrorStatusValidProxyAuthenticationRequired,
+  /// An unknown error occurred.
+  unknown,
+
+  /// The SSL certificate common name does not match the web address.
+  certificateCommonNameIsIncorrect,
+
+  /// The SSL certificate has expired.
+  certificateExpired,
+
+  /// The SSL client certificate contains errors.
+  clientCertificateContainsErrors,
+
+  /// The SSL certificate has been revoked.
+  certificateRevoked,
+
+  /// The SSL certificate is invalid.
+  certificateIsInvalid,
+
+  /// The host is unreachable.
+  serverUnreachable,
+
+  /// The connection has timed out.
+  timeout,
+
+  /// The server returned an invalid or unrecognized response.
+  errorHttpInvalidServerResponse,
+
+  /// The connection was aborted.
+  connectionAborted,
+
+  /// The connection was reset.
+  connectionReset,
+
+  /// The internet connection has been lost.
+  disconnected,
+
+  /// A connection to the destination was not established.
+  cannotConnect,
+
+  /// The provided host name was not able to be resolved.
+  hostNameNotResolved,
+
+  /// The operation was canceled.
+  operationCanceled,
+
+  /// The request redirect failed.
+  redirectFailed,
+
+  /// An unexpected error occurred.
+  unexpectedError,
+
+  /// The request requires authentication credentials.
+  validAuthenticationCredentialsRequired,
+
+  /// The request requires proxy authentication.
+  validProxyAuthenticationRequired,
 }

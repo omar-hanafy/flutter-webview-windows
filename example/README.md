@@ -1,16 +1,19 @@
 # webview_windows_example
 
-Demonstrates how to use the webview_windows plugin.
+Demonstrates how to use the webview_windows plugin: a minimal browser with a
+URL bar, loading indicator, DevTools access, permission prompts, and
+suspend/resume.
 
-## Getting Started
+Run it with:
 
-This project is a starting point for a Flutter application.
+```sh
+flutter run -d windows
+```
 
-A few resources to get you started if this is your first Flutter project:
+The real-input integration test for the keyboard-focus behavior lives in
+[`integration_test/focus_test.dart`](integration_test/focus_test.dart) and
+requires an interactive Windows session:
 
-- [Lab: Write your first Flutter app](https://flutter.dev/docs/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://flutter.dev/docs/cookbook)
-
-For help getting started with Flutter, view our
-[online documentation](https://flutter.dev/docs), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```sh
+flutter test integration_test/focus_test.dart -d windows
+```

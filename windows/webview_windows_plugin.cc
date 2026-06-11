@@ -3,6 +3,7 @@
 #include <flutter/method_channel.h>
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
+#include <wil/resource.h>
 #include <windows.h>
 
 #include <memory>
@@ -23,8 +24,10 @@ constexpr auto kMethodInitialize = "initialize";
 constexpr auto kMethodDispose = "dispose";
 constexpr auto kMethodInitializeEnvironment = "initializeEnvironment";
 constexpr auto kMethodGetWebViewVersion = "getWebViewVersion";
+constexpr auto kMethodReclaimFocus = "reclaimFocus";
 
 constexpr auto kErrorCodeInvalidId = "invalid_id";
+constexpr auto kErrorCodeInvalidArguments = "invalid_arguments";
 constexpr auto kErrorCodeEnvironmentCreationFailed =
     "environment_creation_failed";
 constexpr auto kErrorCodeEnvironmentAlreadyInitialized =
@@ -49,8 +52,7 @@ class WebviewWindowsPlugin : public flutter::Plugin {
  public:
   static void RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar);
 
-  WebviewWindowsPlugin(flutter::TextureRegistrar* textures,
-                       flutter::BinaryMessenger* messenger);
+  WebviewWindowsPlugin(flutter::PluginRegistrarWindows* registrar);
 
   virtual ~WebviewWindowsPlugin();
 
@@ -60,10 +62,14 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   std::unordered_map<int64_t, std::unique_ptr<WebviewBridge>> instances_;
 
   WNDCLASS window_class_ = {};
+  flutter::PluginRegistrarWindows* registrar_;
   flutter::TextureRegistrar* textures_;
   flutter::BinaryMessenger* messenger_;
 
   bool InitPlatform();
+
+  // Returns the HWND of the Flutter view, or nullptr if unavailable.
+  HWND GetFlutterViewHwnd();
 
   void CreateWebviewInstance(
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>);
@@ -81,8 +87,7 @@ void WebviewWindowsPlugin::RegisterWithRegistrar(
           registrar->messenger(), "io.jns.webview.win",
           &flutter::StandardMethodCodec::GetInstance());
 
-  auto plugin = std::make_unique<WebviewWindowsPlugin>(
-      registrar->texture_registrar(), registrar->messenger());
+  auto plugin = std::make_unique<WebviewWindowsPlugin>(registrar);
 
   channel->SetMethodCallHandler(
       [plugin_pointer = plugin.get()](const auto& call, auto result) {
@@ -92,11 +97,14 @@ void WebviewWindowsPlugin::RegisterWithRegistrar(
   registrar->AddPlugin(std::move(plugin));
 }
 
-WebviewWindowsPlugin::WebviewWindowsPlugin(flutter::TextureRegistrar* textures,
-                                           flutter::BinaryMessenger* messenger)
-    : textures_(textures), messenger_(messenger) {
+WebviewWindowsPlugin::WebviewWindowsPlugin(
+    flutter::PluginRegistrarWindows* registrar)
+    : registrar_(registrar),
+      textures_(registrar->texture_registrar()),
+      messenger_(registrar->messenger()) {
   window_class_.lpszClassName = L"FlutterWebviewMessage";
   window_class_.lpfnWndProc = &DefWindowProc;
+  window_class_.hInstance = GetModuleHandle(nullptr);
   RegisterClass(&window_class_);
 }
 
@@ -119,18 +127,23 @@ void WebviewWindowsPlugin::HandleMethodCall(
                            "The platform is not supported");
     }
 
-    const auto& map = std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto map =
+        std::get_if<flutter::EncodableMap>(method_call.arguments());
+    if (!map) {
+      return result->Error(kErrorCodeInvalidArguments,
+                           "initializeEnvironment expects a map.");
+    }
 
     std::optional<std::wstring> browser_exe_wpath = std::nullopt;
     std::optional<std::string> browser_exe_path =
-        GetOptionalValue<std::string>(map, "browserExePath");
+        GetOptionalValue<std::string>(*map, "browserExePath");
     if (browser_exe_path) {
       browser_exe_wpath = util::Utf16FromUtf8(*browser_exe_path);
     }
 
     std::optional<std::wstring> user_data_wpath = std::nullopt;
     std::optional<std::string> user_data_path =
-        GetOptionalValue<std::string>(map, "userDataPath");
+        GetOptionalValue<std::string>(*map, "userDataPath");
     if (user_data_path) {
       user_data_wpath = util::Utf16FromUtf8(*user_data_path);
     } else {
@@ -138,10 +151,10 @@ void WebviewWindowsPlugin::HandleMethodCall(
     }
 
     std::optional<std::string> additional_args =
-        GetOptionalValue<std::string>(map, "additionalArguments");
+        GetOptionalValue<std::string>(*map, "additionalArguments");
 
-    webview_host_ = std::move(WebviewHost::Create(
-        platform_.get(), user_data_wpath, browser_exe_wpath, additional_args));
+    webview_host_ = WebviewHost::Create(
+        platform_.get(), user_data_wpath, browser_exe_wpath, additional_args);
     if (!webview_host_) {
       return result->Error(kErrorCodeEnvironmentCreationFailed);
     }
@@ -150,15 +163,27 @@ void WebviewWindowsPlugin::HandleMethodCall(
   }
 
   if (method_call.method_name().compare(kMethodGetWebViewVersion) == 0) {
-    LPWSTR version_info = nullptr;
-    auto hr =
-        GetAvailableCoreWebView2BrowserVersionString(nullptr, &version_info);
+    wil::unique_cotaskmem_string version_info;
+    auto hr = GetAvailableCoreWebView2BrowserVersionString(
+        nullptr, version_info.put());
     if (SUCCEEDED(hr) && version_info != nullptr) {
       return result->Success(
-          flutter::EncodableValue(util::Utf8FromUtf16(version_info)));
+          flutter::EncodableValue(util::Utf8FromUtf16(version_info.get())));
     } else {
       return result->Success();
     }
+  }
+
+  if (method_call.method_name().compare(kMethodReclaimFocus) == 0) {
+    // Moves Win32 keyboard focus back to the Flutter view. This is invoked
+    // by the Dart side whenever the user clicks outside of any webview while
+    // a webview holds native focus, restoring Flutter's keyboard handling
+    // without a window activation round trip.
+    auto view_hwnd = GetFlutterViewHwnd();
+    if (view_hwnd) {
+      SetFocus(view_hwnd);
+    }
+    return result->Success(flutter::EncodableValue(view_hwnd != nullptr));
   }
 
   if (method_call.method_name().compare(kMethodInitialize) == 0) {
@@ -166,7 +191,13 @@ void WebviewWindowsPlugin::HandleMethodCall(
   }
 
   if (method_call.method_name().compare(kMethodDispose) == 0) {
-    if (const auto texture_id = std::get_if<int64_t>(method_call.arguments())) {
+    // The standard codec encodes a Dart int as int32 when it fits, so the
+    // texture id must be read size-agnostically. Matching on int64 alone
+    // would silently fail to dispose instances with small ids.
+    const auto texture_id = method_call.arguments()
+                                ? method_call.arguments()->TryGetLongValue()
+                                : std::nullopt;
+    if (texture_id.has_value()) {
       const auto it = instances_.find(*texture_id);
       if (it != instances_.end()) {
         instances_.erase(it);
@@ -201,7 +232,7 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
   std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
       shared_result = std::move(result);
   webview_host_->CreateWebview(
-      hwnd, true, true,
+      hwnd, GetFlutterViewHwnd(), true, true,
       [shared_result, this](std::unique_ptr<Webview> webview,
                             std::unique_ptr<WebviewCreationError> error) {
         if (!webview) {
@@ -236,6 +267,17 @@ bool WebviewWindowsPlugin::InitPlatform() {
     platform_ = std::make_unique<WebviewPlatform>();
   }
   return platform_->IsSupported();
+}
+
+HWND WebviewWindowsPlugin::GetFlutterViewHwnd() {
+  if (!registrar_) {
+    return nullptr;
+  }
+  auto view = registrar_->GetView();
+  if (!view) {
+    return nullptr;
+  }
+  return view->GetNativeWindow();
 }
 
 }  // namespace

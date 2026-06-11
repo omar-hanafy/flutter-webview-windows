@@ -6,8 +6,84 @@
 #include <format>
 
 #include "texture_bridge_gpu.h"
+#include "util/cursor_util.h"
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Wire-format contract with the Dart side.
+//
+// Enum values cross the method/event channels as plain integers and the Dart
+// side (lib/src/enums.dart) decodes them as indexes into the corresponding
+// Dart enums. The integer values pinned below ARE the protocol: if any of
+// these asserts fires, the matching Dart enum (and its contract test in
+// test/webview_windows_test.dart) must be updated in the same change.
+// ---------------------------------------------------------------------------
+
+static_assert(static_cast<int>(WebviewLoadingState::None) == 0);
+static_assert(static_cast<int>(WebviewLoadingState::Loading) == 1);
+static_assert(static_cast<int>(WebviewLoadingState::NavigationCompleted) == 2);
+
+static_assert(static_cast<int>(WebviewPointerButton::None) == 0);
+static_assert(static_cast<int>(WebviewPointerButton::Primary) == 1);
+static_assert(static_cast<int>(WebviewPointerButton::Secondary) == 2);
+static_assert(static_cast<int>(WebviewPointerButton::Tertiary) == 3);
+
+static_assert(static_cast<int>(WebviewPointerEventKind::Activate) == 0);
+static_assert(static_cast<int>(WebviewPointerEventKind::Down) == 1);
+static_assert(static_cast<int>(WebviewPointerEventKind::Enter) == 2);
+static_assert(static_cast<int>(WebviewPointerEventKind::Leave) == 3);
+static_assert(static_cast<int>(WebviewPointerEventKind::Up) == 4);
+static_assert(static_cast<int>(WebviewPointerEventKind::Update) == 5);
+
+static_assert(static_cast<int>(WebviewDownloadEventKind::DownloadStarted) ==
+              0);
+static_assert(static_cast<int>(WebviewDownloadEventKind::DownloadCompleted) ==
+              1);
+static_assert(static_cast<int>(WebviewDownloadEventKind::DownloadProgress) ==
+              2);
+
+static_assert(static_cast<int>(WebviewPermissionKind::Unknown) == 0);
+static_assert(static_cast<int>(WebviewPermissionKind::Microphone) == 1);
+static_assert(static_cast<int>(WebviewPermissionKind::Camera) == 2);
+static_assert(static_cast<int>(WebviewPermissionKind::GeoLocation) == 3);
+static_assert(static_cast<int>(WebviewPermissionKind::Notifications) == 4);
+static_assert(static_cast<int>(WebviewPermissionKind::OtherSensors) == 5);
+static_assert(static_cast<int>(WebviewPermissionKind::ClipboardRead) == 6);
+
+static_assert(static_cast<int>(WebviewHostResourceAccessKind::Deny) == 0);
+static_assert(static_cast<int>(WebviewHostResourceAccessKind::Allow) == 1);
+static_assert(static_cast<int>(WebviewHostResourceAccessKind::DenyCors) == 2);
+
+// onLoadError forwards COREWEBVIEW2_WEB_ERROR_STATUS verbatim; the Dart
+// WebErrorStatus enum mirrors the first 19 values and maps anything newer to
+// WebErrorStatus.unknown. Pin the SDK values this plugin was built against so
+// an SDK that breaks the established numbering cannot slip through.
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN == 0);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT ==
+              1);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED == 2);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS ==
+              3);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED == 4);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID == 5);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE == 6);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT == 7);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE ==
+              8);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED == 9);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET == 10);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED == 11);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT == 12);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED == 13);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED == 14);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED == 15);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR == 16);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_VALID_AUTHENTICATION_CREDENTIALS_REQUIRED ==
+              17);
+static_assert(COREWEBVIEW2_WEB_ERROR_STATUS_VALID_PROXY_AUTHENTICATION_REQUIRED ==
+              18);
+
 constexpr auto kErrorInvalidArgs = "invalidArguments";
 
 constexpr auto kMethodLoadUrl = "loadUrl";
@@ -41,6 +117,7 @@ constexpr auto kMethodClearCache = "clearCache";
 constexpr auto kMethodSetCacheDisabled = "setCacheDisabled";
 constexpr auto kMethodSetPopupWindowPolicy = "setPopupWindowPolicy";
 constexpr auto kMethodSetFpsLimit = "setFpsLimit";
+constexpr auto kMethodMoveFocus = "moveFocus";
 
 constexpr auto kEventType = "type";
 constexpr auto kEventValue = "value";
@@ -78,59 +155,6 @@ GetPointAndScaleFactorFromArgs(const flutter::EncodableValue* args) {
     return std::nullopt;
   }
   return std::make_tuple(*x, *y, *z);
-}
-
-static const std::string& GetCursorName(const HCURSOR cursor) {
-  // The cursor names correspond to the Flutter Engine names:
-  // in shell/platform/windows/flutter_window_win32.cc
-  static const std::string kDefaultCursorName = "basic";
-  static const std::pair<std::string, const wchar_t*> mappings[] = {
-      {"allScroll", IDC_SIZEALL},
-      {kDefaultCursorName, IDC_ARROW},
-      {"click", IDC_HAND},
-      {"forbidden", IDC_NO},
-      {"help", IDC_HELP},
-      {"move", IDC_SIZEALL},
-      {"none", nullptr},
-      {"noDrop", IDC_NO},
-      {"precise", IDC_CROSS},
-      {"progress", IDC_APPSTARTING},
-      {"text", IDC_IBEAM},
-      {"resizeColumn", IDC_SIZEWE},
-      {"resizeDown", IDC_SIZENS},
-      {"resizeDownLeft", IDC_SIZENESW},
-      {"resizeDownRight", IDC_SIZENWSE},
-      {"resizeLeft", IDC_SIZEWE},
-      {"resizeLeftRight", IDC_SIZEWE},
-      {"resizeRight", IDC_SIZEWE},
-      {"resizeRow", IDC_SIZENS},
-      {"resizeUp", IDC_SIZENS},
-      {"resizeUpDown", IDC_SIZENS},
-      {"resizeUpLeft", IDC_SIZENWSE},
-      {"resizeUpRight", IDC_SIZENESW},
-      {"resizeUpLeftDownRight", IDC_SIZENWSE},
-      {"resizeUpRightDownLeft", IDC_SIZENESW},
-      {"wait", IDC_WAIT},
-  };
-
-  static std::map<HCURSOR, std::string> cursors;
-  static bool initialized = false;
-
-  if (!initialized) {
-    initialized = true;
-    for (const auto& pair : mappings) {
-      HCURSOR cursor_handle = LoadCursor(nullptr, pair.second);
-      if (cursor_handle) {
-        cursors[cursor_handle] = pair.first;
-      }
-    }
-  }
-
-  const auto it = cursors.find(cursor);
-  if (it != cursors.end()) {
-    return it->second;
-  }
-  return kDefaultCursorName;
 }
 
 }  // namespace
@@ -196,6 +220,12 @@ WebviewBridge::WebviewBridge(flutter::BinaryMessenger* messenger,
 WebviewBridge::~WebviewBridge() {
   method_channel_->SetMethodCallHandler(nullptr);
   texture_registrar_->UnregisterTexture(texture_id_);
+  // Tear down explicitly in a safe order: ~Webview closes the WebView2
+  // controller, which can synchronously raise LostFocus and try to emit
+  // through the event sink. Relying on member destruction order alone would
+  // destroy the sink first, leaving that callback with a dangling reference.
+  event_sink_ = nullptr;
+  webview_ = nullptr;
 }
 
 void WebviewBridge::RegisterEventHandlers() {
@@ -289,7 +319,7 @@ void WebviewBridge::RegisterEventHandlers() {
   });
 
   webview_->OnCursorChanged([this](const HCURSOR cursor) {
-    const auto& name = GetCursorName(cursor);
+    const auto& name = util::GetCursorName(cursor);
     const auto event = flutter::EncodableValue(
         flutter::EncodableMap{{flutter::EncodableValue(kEventType),
                                flutter::EncodableValue("cursorChanged")},
@@ -321,6 +351,14 @@ void WebviewBridge::RegisterEventHandlers() {
              contains_fullscreen_element}});
         EmitEvent(event);
       });
+
+  webview_->OnFocusChanged([this](bool focused) {
+    const auto event = flutter::EncodableValue(
+        flutter::EncodableMap{{flutter::EncodableValue(kEventType),
+                               flutter::EncodableValue("focus")},
+                              {flutter::EncodableValue(kEventValue), focused}});
+    EmitEvent(event);
+  });
 }
 
 void WebviewBridge::OnPermissionRequested(
@@ -404,11 +442,15 @@ void WebviewBridge::HandleMethodCall(
 
   // setPointerButton: {"button": int, "isDown": bool}
   if (method_name.compare(kMethodSetPointerButton) == 0) {
-    const auto& map = std::get<flutter::EncodableMap>(*method_call.arguments());
+    const auto map =
+        std::get_if<flutter::EncodableMap>(method_call.arguments());
+    if (!map) {
+      return result->Error(kErrorInvalidArgs);
+    }
 
-    const auto button = map.find(flutter::EncodableValue("button"));
-    const auto isDown = map.find(flutter::EncodableValue("isDown"));
-    if (button != map.end() && isDown != map.end()) {
+    const auto button = map->find(flutter::EncodableValue("button"));
+    const auto isDown = map->find(flutter::EncodableValue("isDown"));
+    if (button != map->end() && isDown != map->end()) {
       const auto buttonValue = std::get_if<int32_t>(&button->second);
       const auto isDownValue = std::get_if<bool>(&isDown->second);
       if (buttonValue && isDownValue) {
@@ -693,6 +735,15 @@ void WebviewBridge::HandleMethodCall(
                                                : std::make_optional(*value));
       return result->Success();
     }
+    return result->Error(kErrorInvalidArgs);
+  }
+
+  // moveFocus
+  if (method_name.compare(kMethodMoveFocus) == 0) {
+    if (webview_->MoveFocus()) {
+      return result->Success();
+    }
+    return result->Error(kMethodFailed);
   }
 
   result->NotImplemented();

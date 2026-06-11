@@ -96,6 +96,7 @@ struct EventRegistrations {
   EventRegistrationToken cursor_changed_token_{};
   EventRegistrationToken got_focus_token_{};
   EventRegistrationToken lost_focus_token_{};
+  EventRegistrationToken move_focus_requested_token_{};
   EventRegistrationToken web_message_received_token_{};
   EventRegistrationToken permission_requested_token_{};
   EventRegistrationToken devtools_protocol_event_token_{};
@@ -172,6 +173,7 @@ class Webview {
   bool SetZoomFactor(double factor);
   bool Suspend();
   bool Resume();
+  bool MoveFocus();
 
   bool SetVirtualHostNameMapping(const std::string& hostName,
                                  const std::string& path,
@@ -235,6 +237,7 @@ class Webview {
 
  private:
   HWND hwnd_;
+  HWND flutter_view_hwnd_;
   bool owns_window_;
   bool is_valid_ = false;
   float scale_factor_ = 1.0;
@@ -273,7 +276,8 @@ class Webview {
 
   Webview(
       wil::com_ptr<ICoreWebView2CompositionController> composition_controller,
-      WebviewHost* host, HWND hwnd, bool owns_window, bool offscreen_only);
+      WebviewHost* host, HWND hwnd, HWND flutter_view_hwnd, bool owns_window,
+      bool offscreen_only);
 
   bool CreateSurface(
       winrt::com_ptr<ABI::Windows::UI::Composition::ICompositor> compositor,

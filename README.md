@@ -1,38 +1,287 @@
 # webview_windows
 
-[![CI](https://github.com/jnschulze/flutter-webview-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/jnschulze/flutter-webview-windows/actions/workflows/ci.yml)
-[![Pub](https://img.shields.io/pub/v/webview_windows.svg)](https://pub.dartlang.org/packages/webview_windows)
+[![pub package](https://img.shields.io/pub/v/webview_windows.svg)](https://pub.dev/packages/webview_windows)
+[![CI](https://github.com/omar-hanafy/flutter-webview-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/omar-hanafy/flutter-webview-windows/actions/workflows/ci.yml)
 
-A [Flutter](https://flutter.dev/) WebView plugin for Windows built on [Microsoft Edge WebView2](https://docs.microsoft.com/en-us/microsoft-edge/webview2/).
+A WebView for Flutter on Windows, powered by
+[Microsoft Edge WebView2](https://learn.microsoft.com/en-us/microsoft-edge/webview2/).
+The browser is rendered off-screen and composited into your widget tree as a
+regular Flutter `Texture`, so it behaves like any other widget: no airspace
+issues, and transforms, opacity, and widgets painted on top all just work.
 
+> **Fork notice:** this is a maintained fork of
+> [jnschulze/flutter-webview-windows](https://github.com/jnschulze/flutter-webview-windows).
+> On top of upstream `0.4.0` it fixes the
+> [window focus loss issue (#230)](https://github.com/jnschulze/flutter-webview-windows/issues/230),
+> hardens the native COM and channel layers, modernizes the toolchain
+> (WebView2 SDK `1.0.3967.48`, WIL `1.0.260126.7`, C++23), and ships a real
+> test suite. Coming from upstream? Read the
+> [migration guide](https://github.com/omar-hanafy/flutter-webview-windows/blob/main/migration_guide.md).
 
-### Target platform requirements
-- [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)  
-  Before initializing the webview, call `getWebViewVersion()` to check whether the required **WebView2 Runtime** is installed or not on the current system. If `getWebViewVersion()` returns null, guide your user to install **WebView2 Runtime** from this [page](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
-- Windows 10 1809+
+![Example app](https://user-images.githubusercontent.com/720469/116823636-d8b9fe00-ab85-11eb-9f91-b7bc819615ed.png)
 
-### Development platform requirements
-- Visual Studio 2019 or higher
-- Windows 11 SDK (10.0.22000.194 or higher)
-- (recommended) nuget.exe in your $PATH *(The makefile attempts to download nuget if it's not installed, however, this fallback might not work in China)*
+## Features
 
-## Demo
-![image](https://user-images.githubusercontent.com/720469/116823636-d8b9fe00-ab85-11eb-9f91-b7bc819615ed.png)
+- **Seamless composition.** Web content renders into a Flutter `Texture`
+  inside your widget tree, not a native window floating above it.
+- **Keyboard focus that works.** Clicking the webview does not deactivate
+  your window, clicking back on Flutter UI restores Flutter's keyboard
+  handling instantly, and `Tab` traversal leaves the page cleanly.
+- **Typed broadcast event streams** for URL, loading state, document title,
+  navigation history, security state, full-screen elements, downloads, load
+  errors, web messages, and native focus.
+- **Two-way JavaScript bridge**: execute scripts, register
+  on-document-created scripts, and exchange JSON messages with the page.
+- **Browser control**: cookies, cache, user agent, zoom, background color,
+  popup policy, virtual host mapping, suspend/resume, FPS limiting, and
+  DevTools.
+- **Faithful input forwarding**: mouse, high-precision trackpad scrolling,
+  and multi-touch.
+- **High-DPI aware**, including per-view scale factors in multi-window apps.
 
-https://user-images.githubusercontent.com/720469/116716747-66f08180-a9d8-11eb-86ca-63ad5c24f07b.mp4
+## Requirements
 
+**On your users' machines**
 
+- Windows 10 1809 or newer (the off-screen compositor relies on
+  `Windows.Graphics.Capture`).
+- The [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
+  It ships with Windows 11 and current Windows 10. To verify at startup, call
+  `WebviewController.getWebViewVersion()`: if it returns `null`, guide the
+  user to install the runtime.
+
+**On your development machine**
+
+- Flutter 3.44+ / Dart 3.12+
+- Visual Studio 2022 with the *Desktop development with C++* workload
+- A Windows 10/11 SDK (installed with the workload by default)
+- Optional: `nuget.exe` in your `PATH` (the build downloads it automatically
+  if missing)
+
+## Installation
+
+```sh
+flutter pub add webview_windows
+```
+
+To track unreleased changes, depend on the repository instead:
+
+```yaml
+dependencies:
+  webview_windows:
+    git:
+      url: https://github.com/omar-hanafy/flutter-webview-windows.git
+      ref: main
+```
+
+## Quick start
+
+Create a `WebviewController`, initialize it, and hand it to a `Webview`
+widget:
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:webview_windows/webview_windows.dart';
+
+class BrowserPane extends StatefulWidget {
+  const BrowserPane({super.key});
+
+  @override
+  State<BrowserPane> createState() => _BrowserPaneState();
+}
+
+class _BrowserPaneState extends State<BrowserPane> {
+  final _controller = WebviewController();
+
+  @override
+  void initState() {
+    super.initState();
+    _initWebview();
+  }
+
+  Future<void> _initWebview() async {
+    await _controller.initialize();
+    await _controller.setPopupWindowPolicy(WebviewPopupWindowPolicy.deny);
+    await _controller.loadUrl('https://flutter.dev');
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _controller.value.isInitialized
+        ? Webview(_controller)
+        : const Center(child: CircularProgressIndicator());
+  }
+}
+```
+
+`initialize()` completes with an error if the WebView2 Runtime is missing
+(error code `environment_creation_failed`), so wrap it in a `try`/`catch` if
+you want to show a friendly install prompt.
+
+## Listening to events
+
+All controller streams are broadcast streams: attach as many listeners as you
+like, but subscribe *before* triggering navigation, because events emitted
+while nobody listens are dropped.
+
+```dart
+controller.url.listen((url) => debugPrint('URL: $url'));
+controller.loadingState.listen((state) => debugPrint('State: $state'));
+controller.title.listen((title) => debugPrint('Title: $title'));
+controller.historyChanged.listen((h) => debugPrint('canGoBack: ${h.canGoBack}'));
+controller.onLoadError.listen((status) => debugPrint('Load error: $status'));
+controller.onDownloadEvent.listen((e) => debugPrint('${e.kind}: ${e.url}'));
+```
+
+## Talking to the page
+
+Execute JavaScript and get its (JSON-decoded) result, or inject scripts that
+run before any page script:
+
+```dart
+final title = await controller.executeScript('document.title');
+
+final scriptId = await controller.addScriptToExecuteOnDocumentCreated(
+  'window.myAppReady = true;',
+);
+```
+
+Exchange structured messages with the page:
+
+```dart
+// Dart -> page
+await controller.postWebMessage('{"command": "ping"}');
+
+// page -> Dart
+controller.webMessage.listen((message) {
+  debugPrint('Page says: $message'); // already JSON-decoded
+});
+```
+
+And on the JavaScript side:
+
+```js
+window.chrome.webview.addEventListener('message', (e) => {
+  console.log(e.data); // {command: 'ping'}
+});
+window.chrome.webview.postMessage({command: 'pong'});
+```
+
+## Permission requests
+
+Web content can request browser permissions (camera, microphone, geolocation,
+clipboard, notifications). Decide per request via the `Webview` widget:
+
+```dart
+Webview(
+  controller,
+  permissionRequested: (url, kind, isUserInitiated) async {
+    final allowed = await askTheUser(url, kind);
+    return allowed
+        ? WebviewPermissionDecision.allow
+        : WebviewPermissionDecision.deny;
+  },
+)
+```
+
+Return `WebviewPermissionDecision.none` to defer to the WebView2 default.
+
+## Keyboard focus
+
+Clicking into the webview gives the page real Win32 keyboard focus; clicking
+any Flutter widget hands focus back automatically. You normally do not have
+to manage any of this. For programmatic control:
+
+```dart
+await controller.focus();               // move keyboard focus into the page
+await WebviewController.releaseFocus(); // hand it back to Flutter
+
+controller.onFocusChanged.listen((focused) => debugPrint('Page focus: $focused'));
+final focused = controller.hasNativeFocus;
+```
+
+## Configuring the browser environment
+
+The WebView2 environment is shared by all controllers and is created lazily
+on the first `initialize()`. To customize it (user data directory, browser
+executable, Chromium command line flags), configure it once *before* creating
+any controller:
+
+```dart
+await WebviewController.initializeEnvironment(
+  userDataPath: r'C:\path\to\profile',
+  additionalArguments: '--show-fps-counter',
+);
+```
+
+It throws a `PlatformException` if the environment already exists.
+
+## Example app and tests
+
+A complete example (URL bar, loading indicator, DevTools, permission prompts)
+lives in [`example/`](example/): `cd example && flutter run -d windows`.
+
+The repository also ships:
+
+- a Dart test suite (`flutter test`) covering the channel contract of every
+  controller method, the controller lifecycle, all events, and input/focus
+  forwarding,
+- native C++ unit tests (GoogleTest), run from the repository root:
+
+  ```sh
+  cmake -S windows/test -B build/native_tests
+  cmake --build build/native_tests --config Release
+  ctest --test-dir build/native_tests -C Release --output-on-failure
+  ```
+
+- a real-input integration test for the focus behavior
+  (`example/integration_test/focus_test.dart`), which needs an interactive
+  Windows session.
+
+Tip for your own widget tests: when driving a `WebviewController` under
+`testWidgets`, wrap `initialize()` and `dispose()` in `tester.runAsync(...)`.
+Test bodies run in a fake-async zone where platform channel futures are not
+driven, so awaiting them directly hangs the test.
 
 ## Limitations
-This plugin provides seamless composition of web-based contents with other Flutter widgets by rendering off-screen.
 
-Unfortunately, [Microsoft Edge WebView2](https://docs.microsoft.com/en-us/microsoft-edge/webview2/) doesn't currently have an explicit API for offscreen rendering.
-In order to still be able to obtain a pixel buffer upon rendering a new frame, this plugin currently relies on the `Windows.Graphics.Capture` API provided by Windows 10.
-The downside is that older Windows versions aren't currently supported.
+WebView2 has no official off-screen rendering API yet
+([WebView2Feedback#20](https://github.com/MicrosoftEdge/WebView2Feedback/issues/20),
+[#526](https://github.com/MicrosoftEdge/WebView2Feedback/issues/526),
+[#547](https://github.com/MicrosoftEdge/WebView2Feedback/issues/547)).
+This plugin obtains frames through `Windows.Graphics.Capture`, which is why
+Windows versions older than Windows 10 1809 are not supported.
 
-Older Windows versions might still be targeted by using `BitBlt` for the time being.
+## Troubleshooting
 
-See:
-- https://github.com/MicrosoftEdge/WebView2Feedback/issues/20
-- https://github.com/MicrosoftEdge/WebView2Feedback/issues/526
-- https://github.com/MicrosoftEdge/WebView2Feedback/issues/547
+- **`initialize()` fails with `environment_creation_failed`**: the WebView2
+  Runtime is missing. Check `WebviewController.getWebViewVersion()` and point
+  the user to the [runtime installer](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
+- **The build cannot download NuGet**: install
+  [nuget.exe](https://www.nuget.org/downloads) manually and add it to `PATH`.
+- **Keyboard input stays in the page after clicking it**: that is by design;
+  click any Flutter widget or call `WebviewController.releaseFocus()` to
+  return focus to Flutter.
+
+## Migrating from upstream 0.4.x
+
+Version 1.0.0 contains breaking changes (SDK floors, broadcast streams,
+`WebErrorStatus` renames, stricter lifecycle errors). The
+[migration guide](https://github.com/omar-hanafy/flutter-webview-windows/blob/main/migration_guide.md)
+walks through every one of them, including the focus workarounds you can now
+delete.
+
+## Credits and license
+
+Created by [Niklas Schulze (jnschulze)](https://github.com/jnschulze); this
+fork is maintained by [Omar Hanafy](https://github.com/omar-hanafy).
+Licensed under the [BSD 3-Clause License](LICENSE).
