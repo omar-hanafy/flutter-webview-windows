@@ -242,11 +242,15 @@ Return `WebviewPermissionDecision.none` to defer to the WebView2 default.
 ## Keyboard focus
 
 Clicking into the webview gives the page real Win32 keyboard focus; clicking
-any Flutter widget hands focus back automatically. The same handover happens
-when a Flutter text input gains focus without a click - for example an
-autofocused `TextField` in a programmatically opened dialog - so typing never
-keeps landing in the page. You normally do not have to manage any of this.
-For programmatic control:
+any Flutter widget hands focus back automatically. On top of that, one
+invariant is enforced in both directions: **while a Flutter text input owns
+Flutter focus, no webview keeps native keyboard focus.** If a dialog's
+`TextField` gains focus while the page has the keyboard, focus is handed
+back; if anything - `focus()`, page script, a stale refocus path in app
+code - grabs native focus while a text input is focused, the grab is
+reverted immediately. Typing can never silently land in the page. To move
+focus into the page programmatically, unfocus the text input first. You
+normally do not have to manage any of this. For programmatic control:
 
 ```dart
 await controller.focus();               // move keyboard focus into the page

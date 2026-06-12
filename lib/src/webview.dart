@@ -798,6 +798,11 @@ class WebviewController extends ValueNotifier<WebviewValue> {
   /// This allows the user to type into the web content without having to
   /// click into it first. Clicking into the webview moves native focus to it
   /// automatically; this method exists for programmatic focus handoff.
+  ///
+  /// While a [Webview] widget is mounted, a grab performed while a Flutter
+  /// text input owns Flutter's primary focus is reverted immediately - the
+  /// text input keeps the keyboard. For an intentional handoff, unfocus the
+  /// text input first.
   Future<void> focus() async {
     if (_isDisposed) {
       return;
@@ -1153,23 +1158,42 @@ class _WebviewState extends State<Webview> {
 /// honors hit testing, widgets painted on top of a webview, and render
 /// transforms - all of which a rectangle test would get wrong.
 ///
-/// Pointer presses are not the only way Flutter UI can demand the keyboard:
-/// a dialog opened programmatically may autofocus a [TextField] while a
-/// webview still holds native focus, in which case its keystrokes would keep
-/// landing in the page. The coordinator therefore also watches Flutter's
-/// [FocusManager]: whenever primary focus moves into a Flutter text input
-/// while a webview holds native focus, focus is handed back the same way.
-/// The check is deliberately limited to text inputs - packages embedding the
-/// webview commonly park Flutter focus on a wrapper [Focus] node when the
-/// user clicks into web content, and releasing on every focus change would
-/// fight that pattern.
+/// Pointer presses are not the only way Flutter UI can demand the keyboard,
+/// so the coordinator additionally enforces one invariant from both sides:
+///
+/// **While a Flutter text input owns Flutter's primary focus, no webview
+/// keeps native keyboard focus.**
+///
+/// - When primary focus moves into a Flutter text input while a webview
+///   holds native focus (a dialog autofocusing its [TextField] while the
+///   page has the keyboard), focus is handed back.
+/// - When a webview *gains* native focus while a Flutter text input owns
+///   primary focus (any grab: [WebviewController.focus], a forwarded click,
+///   page script, or a stale "refocus the page" code path elsewhere in the
+///   app), the grab is reverted immediately.
+///
+/// Watching both directions makes the enforcement independent of event
+/// ordering: whichever side reports last triggers the handover, so no race
+/// between the platform channel and Flutter's focus updates can leave the
+/// keyboard in the page while a text input believes it is focused. To move
+/// focus into the page deliberately, unfocus the text input first.
+///
+/// The check is limited to text inputs - packages embedding the webview
+/// commonly park Flutter focus on a wrapper [Focus] node when the user
+/// clicks into web content, and releasing on every focus change would fight
+/// that pattern.
 class _WebviewFocusCoordinator {
   static final Set<_WebviewState> _instances = <_WebviewState>{};
+  static final Map<_WebviewState, StreamSubscription<bool>>
+  _nativeFocusSubscriptions = <_WebviewState, StreamSubscription<bool>>{};
   static final Set<int> _claimedPointers = <int>{};
   static bool _routeInstalled = false;
 
   static void register(_WebviewState state) {
     _instances.add(state);
+    _nativeFocusSubscriptions[state] = state._controller.onFocusChanged.listen(
+      _handleNativeFocusChanged,
+    );
     if (!_routeInstalled) {
       _routeInstalled = true;
       GestureBinding.instance.pointerRouter.addGlobalRoute(_handlePointerEvent);
@@ -1179,6 +1203,7 @@ class _WebviewFocusCoordinator {
 
   static void unregister(_WebviewState state) {
     _instances.remove(state);
+    unawaited(_nativeFocusSubscriptions.remove(state)?.cancel());
     if (_instances.isEmpty && _routeInstalled) {
       _routeInstalled = false;
       _claimedPointers.clear();
@@ -1211,17 +1236,32 @@ class _WebviewFocusCoordinator {
   }
 
   static void _handleFlutterFocusChange() {
+    if (!_flutterTextInputHasPrimaryFocus()) {
+      return;
+    }
+    _releaseNativeFocusIfHeld();
+  }
+
+  /// Enforces the invariant from the native side: a webview that gains
+  /// native focus while a Flutter text input owns primary focus had no
+  /// right to take it - hand it straight back, whatever code path grabbed
+  /// it. Loss of native focus needs no action.
+  static void _handleNativeFocusChanged(bool focused) {
+    if (!focused || !_flutterTextInputHasPrimaryFocus()) {
+      return;
+    }
+    unawaited(WebviewController.releaseFocus());
+  }
+
+  static bool _flutterTextInputHasPrimaryFocus() {
     final context = FocusManager.instance.primaryFocus?.context;
     if (context == null) {
-      return;
+      return false;
     }
     // A text input's focus node is attached inside the EditableText that
     // every Flutter text field (TextField, CupertinoTextField,
     // SelectableText, ...) builds, so it is found as an ancestor state.
-    if (context.findAncestorStateOfType<EditableTextState>() == null) {
-      return;
-    }
-    _releaseNativeFocusIfHeld();
+    return context.findAncestorStateOfType<EditableTextState>() != null;
   }
 
   static void _releaseNativeFocusIfHeld() {

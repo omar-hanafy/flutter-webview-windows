@@ -1192,6 +1192,80 @@ void main() {
       await unmountAndDispose(tester, controller);
     });
 
+    testWidgets('webview gaining native focus while a text input is focused '
+        'hands focus straight back', (tester) async {
+      final controller = await createInitializedController(tester);
+      final textFieldFocus = FocusNode();
+      addTearDown(textFieldFocus.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                SizedBox(width: 300, height: 300, child: Webview(controller)),
+                TextField(focusNode: textFieldFocus),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // The text input owns Flutter focus FIRST...
+      textFieldFocus.requestFocus();
+      await tester.pump();
+      expect(textFieldFocus.hasPrimaryFocus, isTrue);
+
+      // ...and only then does the webview report a native focus grab (a
+      // programmatic focus(), page script, or a stale recovery path firing
+      // late). The grab must be reverted: this is the event ordering the
+      // Flutter-focus listener alone cannot see, because no Flutter focus
+      // change happens after the grab.
+      pluginLog.clear();
+      eventSink!.success({'type': 'focus', 'value': true});
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      expect(pluginLog.where((c) => c.method == 'reclaimFocus'), hasLength(1));
+
+      await unmountAndDispose(tester, controller);
+    });
+
+    testWidgets('webview gaining native focus while a wrapper Focus node is '
+        'focused is left alone', (tester) async {
+      final controller = await createInitializedController(tester);
+      final wrapperFocus = FocusNode();
+      addTearDown(wrapperFocus.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                SizedBox(width: 300, height: 300, child: Webview(controller)),
+                Focus(focusNode: wrapperFocus, child: const SizedBox.shrink()),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Embedding packages park Flutter focus on a wrapper node and then
+      // hand native focus to the page (the click-into-the-editor flow).
+      // That grab is legitimate and must not be reverted.
+      wrapperFocus.requestFocus();
+      await tester.pump();
+
+      pluginLog.clear();
+      eventSink!.success({'type': 'focus', 'value': true});
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      expect(pluginLog.where((c) => c.method == 'reclaimFocus'), isEmpty);
+
+      await unmountAndDispose(tester, controller);
+    });
+
     testWidgets('focusing a non-text-input node does not release native '
         'focus', (tester) async {
       final controller = await createInitializedController(tester);
