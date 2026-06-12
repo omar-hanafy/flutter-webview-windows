@@ -7,6 +7,8 @@
 #include <winrt/base.h>
 
 #include <functional>
+#include <string>
+#include <vector>
 
 class WebviewHost;
 
@@ -41,6 +43,22 @@ enum class WebviewHostResourceAccessKind { Deny, Allow, DenyCors };
 struct WebviewHistoryChanged {
   BOOL can_go_back;
   BOOL can_go_forward;
+};
+
+// Mirrors ICoreWebView2Cookie. |expires| is in seconds since the UNIX epoch,
+// or -1 for session cookies. |same_site| carries the
+// COREWEBVIEW2_COOKIE_SAME_SITE_KIND value (None=0, Lax=1, Strict=2), which
+// the Dart side decodes as an enum index.
+struct WebviewCookie {
+  std::string name;
+  std::string value;
+  std::string domain;
+  std::string path;
+  double expires = -1.0;
+  bool is_secure = false;
+  bool is_http_only = false;
+  bool is_session = true;
+  int same_site = 1;
 };
 
 struct WebviewDownloadEvent {
@@ -135,6 +153,8 @@ class Webview {
   typedef std::function<void(bool contains_fullscreen_element)>
       ContainsFullScreenElementChangedCallback;
   typedef std::function<void(WebviewDownloadEvent)> DownloadEventCallback;
+  typedef std::function<void(bool success, std::vector<WebviewCookie> cookies)>
+      GetCookiesCallback;
 
   ~Webview();
 
@@ -163,6 +183,12 @@ class Webview {
   void ExecuteScript(const std::string& script,
                      ScriptExecutedCallback callback);
   bool PostWebMessage(const std::string& json);
+  // |uri| may be empty to request all cookies of the profile.
+  void GetCookies(const std::string& uri, GetCookiesCallback callback);
+  bool SetCookie(const WebviewCookie& cookie);
+  // Deletes cookies named |name| under |uri| (all domains/paths when |uri|
+  // is empty).
+  bool DeleteCookies(const std::string& name, const std::string& uri);
   bool ClearCookies();
   bool ClearCache();
   bool SetCacheDisabled(bool disabled);

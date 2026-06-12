@@ -137,6 +137,21 @@ enum WebviewHostResourceAccessKind {
   denyCors,
 }
 
+/// The SameSite policy of a cookie.
+// Order must match COREWEBVIEW2_COOKIE_SAME_SITE_KIND (the native value is
+// used as an index into this enum).
+enum WebviewCookieSameSite {
+  /// No SameSite restriction; the cookie is sent with all requests.
+  none,
+
+  /// The cookie is withheld on cross-site sub-requests but sent on top-level
+  /// navigations.
+  lax,
+
+  /// The cookie is only sent for same-site requests.
+  strict,
+}
+
 /// The error status of a failed navigation, reported on
 /// [WebviewController.onLoadError].
 ///

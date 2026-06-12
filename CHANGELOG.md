@@ -39,6 +39,19 @@ Fixes the long-standing focus loss issue
 * New API: `WebviewController.focus()`, `WebviewController.releaseFocus()`,
   the `onFocusChanged` stream, and `hasNativeFocus`.
 
+### New features
+
+* Cookie management: `getCookies()`, `setCookie()`, and `deleteCookies()`
+  with a typed `WebviewCookie` model (expiry, SameSite, secure, HTTP-only),
+  alongside the existing `clearCookies()`.
+* Reference-counted environment lifecycle: the WebView2 environment is
+  released when the last controller is disposed, so
+  `initializeEnvironment()` can be called again - e.g. with a different
+  `userDataPath` - without restarting the app.
+* Headless usage: a controller can be driven without a `Webview` widget for
+  background pages; the new `setSize()` gives the invisible page real bounds
+  so it performs layout.
+
 ### Improvements
 
 * `initialize()` is re-entrant: concurrent calls join the in-flight attempt,

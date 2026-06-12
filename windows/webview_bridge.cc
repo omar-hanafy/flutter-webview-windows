@@ -55,6 +55,12 @@ static_assert(static_cast<int>(WebviewHostResourceAccessKind::Deny) == 0);
 static_assert(static_cast<int>(WebviewHostResourceAccessKind::Allow) == 1);
 static_assert(static_cast<int>(WebviewHostResourceAccessKind::DenyCors) == 2);
 
+// Cookie SameSite values cross the channel verbatim; the Dart
+// WebviewCookieSameSite enum decodes them as indexes.
+static_assert(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE == 0);
+static_assert(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX == 1);
+static_assert(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT == 2);
+
 // onLoadError forwards COREWEBVIEW2_WEB_ERROR_STATUS verbatim; the Dart
 // WebErrorStatus enum mirrors the first 19 values and maps anything newer to
 // WebErrorStatus.unknown. Pin the SDK values this plugin was built against so
@@ -112,6 +118,9 @@ constexpr auto kMethodResume = "resume";
 constexpr auto kMethodSetVirtualHostNameMapping = "setVirtualHostNameMapping";
 constexpr auto kMethodClearVirtualHostNameMapping =
     "clearVirtualHostNameMapping";
+constexpr auto kMethodGetCookies = "getCookies";
+constexpr auto kMethodSetCookie = "setCookie";
+constexpr auto kMethodDeleteCookies = "deleteCookies";
 constexpr auto kMethodClearCookies = "clearCookies";
 constexpr auto kMethodClearCache = "clearCache";
 constexpr auto kMethodSetCacheDisabled = "setCacheDisabled";
@@ -681,6 +690,120 @@ void WebviewBridge::HandleMethodCall(
       return result->Success();
     }
     return result->Error(kMethodFailed);
+  }
+
+  // getCookies: string uri (empty for all cookies)
+  if (method_name.compare(kMethodGetCookies) == 0) {
+    if (const auto uri = std::get_if<std::string>(method_call.arguments())) {
+      std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+          shared_result = std::move(result);
+
+      webview_->GetCookies(
+          *uri, [shared_result](bool success,
+                                std::vector<WebviewCookie> cookies) {
+            if (!success) {
+              return shared_result->Error(kMethodFailed,
+                                          "Retrieving cookies failed.");
+            }
+            flutter::EncodableList list;
+            list.reserve(cookies.size());
+            for (const auto& cookie : cookies) {
+              list.push_back(flutter::EncodableValue(flutter::EncodableMap{
+                  {flutter::EncodableValue("name"),
+                   flutter::EncodableValue(cookie.name)},
+                  {flutter::EncodableValue("value"),
+                   flutter::EncodableValue(cookie.value)},
+                  {flutter::EncodableValue("domain"),
+                   flutter::EncodableValue(cookie.domain)},
+                  {flutter::EncodableValue("path"),
+                   flutter::EncodableValue(cookie.path)},
+                  {flutter::EncodableValue("expires"),
+                   flutter::EncodableValue(cookie.expires)},
+                  {flutter::EncodableValue("isSecure"),
+                   flutter::EncodableValue(cookie.is_secure)},
+                  {flutter::EncodableValue("isHttpOnly"),
+                   flutter::EncodableValue(cookie.is_http_only)},
+                  {flutter::EncodableValue("isSession"),
+                   flutter::EncodableValue(cookie.is_session)},
+                  {flutter::EncodableValue("sameSite"),
+                   flutter::EncodableValue(cookie.same_site)},
+              }));
+            }
+            shared_result->Success(flutter::EncodableValue(std::move(list)));
+          });
+      return;
+    }
+    return result->Error(kErrorInvalidArgs);
+  }
+
+  // setCookie: map (see WebviewCookie)
+  if (method_name.compare(kMethodSetCookie) == 0) {
+    const auto map =
+        std::get_if<flutter::EncodableMap>(method_call.arguments());
+    if (!map) {
+      return result->Error(kErrorInvalidArgs);
+    }
+
+    const auto get_string = [map](const char* key) -> const std::string* {
+      const auto it = map->find(flutter::EncodableValue(key));
+      return it != map->end() ? std::get_if<std::string>(&it->second)
+                              : nullptr;
+    };
+    const auto get_bool = [map](const char* key) -> const bool* {
+      const auto it = map->find(flutter::EncodableValue(key));
+      return it != map->end() ? std::get_if<bool>(&it->second) : nullptr;
+    };
+
+    const auto name = get_string("name");
+    const auto value = get_string("value");
+    const auto domain = get_string("domain");
+    const auto path = get_string("path");
+    const auto is_secure = get_bool("isSecure");
+    const auto is_http_only = get_bool("isHttpOnly");
+    const auto expires_it = map->find(flutter::EncodableValue("expires"));
+    const auto expires = expires_it != map->end()
+                             ? std::get_if<double>(&expires_it->second)
+                             : nullptr;
+    const auto same_site_it = map->find(flutter::EncodableValue("sameSite"));
+    const auto same_site = same_site_it != map->end()
+                               ? std::get_if<int32_t>(&same_site_it->second)
+                               : nullptr;
+
+    if (name && value && domain && path && is_secure && is_http_only &&
+        same_site) {
+      WebviewCookie cookie;
+      cookie.name = *name;
+      cookie.value = *value;
+      cookie.domain = *domain;
+      cookie.path = *path;
+      cookie.expires = expires ? *expires : -1.0;
+      cookie.is_secure = *is_secure;
+      cookie.is_http_only = *is_http_only;
+      cookie.same_site = *same_site;
+      if (webview_->SetCookie(cookie)) {
+        return result->Success();
+      }
+      return result->Error(kMethodFailed, "Setting the cookie failed.");
+    }
+    return result->Error(kErrorInvalidArgs);
+  }
+
+  // deleteCookies: [string name, string uri]
+  if (method_name.compare(kMethodDeleteCookies) == 0) {
+    const flutter::EncodableList* list =
+        std::get_if<flutter::EncodableList>(method_call.arguments());
+    if (!list || list->size() != 2) {
+      return result->Error(kErrorInvalidArgs);
+    }
+    const auto name = std::get_if<std::string>(&(*list)[0]);
+    const auto uri = std::get_if<std::string>(&(*list)[1]);
+    if (name && uri) {
+      if (webview_->DeleteCookies(*name, *uri)) {
+        return result->Success();
+      }
+      return result->Error(kMethodFailed, "Deleting cookies failed.");
+    }
+    return result->Error(kErrorInvalidArgs);
   }
 
   // clearCookies

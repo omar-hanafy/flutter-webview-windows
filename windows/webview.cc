@@ -500,6 +500,128 @@ bool Webview::OpenDevTools() {
   return true;
 }
 
+void Webview::GetCookies(const std::string& uri, GetCookiesCallback callback) {
+  wil::com_ptr<ICoreWebView2CookieManager> cookie_manager;
+  auto webview2 = webview_ ? webview_.try_query<ICoreWebView2_2>() : nullptr;
+  if (!IsValid() || !webview2 ||
+      FAILED(webview2->get_CookieManager(cookie_manager.put())) ||
+      !cookie_manager) {
+    return callback(false, {});
+  }
+
+  const auto wuri = util::Utf16FromUtf8(uri);
+  const auto hr = cookie_manager->GetCookies(
+      uri.empty() ? nullptr : wuri.c_str(),
+      Callback<ICoreWebView2GetCookieListCompletedHandler>(
+          [callback](HRESULT result,
+                     ICoreWebView2CookieList* cookie_list) -> HRESULT {
+            if (FAILED(result) || !cookie_list) {
+              callback(false, {});
+              return S_OK;
+            }
+
+            UINT count = 0;
+            cookie_list->get_Count(&count);
+            std::vector<WebviewCookie> cookies;
+            cookies.reserve(count);
+            for (UINT i = 0; i < count; ++i) {
+              wil::com_ptr<ICoreWebView2Cookie> cookie;
+              if (FAILED(cookie_list->GetValueAtIndex(i, cookie.put())) ||
+                  !cookie) {
+                continue;
+              }
+              WebviewCookie entry;
+              wil::unique_cotaskmem_string name, value, domain, path;
+              if (SUCCEEDED(cookie->get_Name(name.put()))) {
+                entry.name = util::Utf8FromUtf16(name.get());
+              }
+              if (SUCCEEDED(cookie->get_Value(value.put()))) {
+                entry.value = util::Utf8FromUtf16(value.get());
+              }
+              if (SUCCEEDED(cookie->get_Domain(domain.put()))) {
+                entry.domain = util::Utf8FromUtf16(domain.get());
+              }
+              if (SUCCEEDED(cookie->get_Path(path.put()))) {
+                entry.path = util::Utf8FromUtf16(path.get());
+              }
+              cookie->get_Expires(&entry.expires);
+              BOOL flag = FALSE;
+              if (SUCCEEDED(cookie->get_IsSecure(&flag))) {
+                entry.is_secure = flag == TRUE;
+              }
+              flag = FALSE;
+              if (SUCCEEDED(cookie->get_IsHttpOnly(&flag))) {
+                entry.is_http_only = flag == TRUE;
+              }
+              flag = FALSE;
+              if (SUCCEEDED(cookie->get_IsSession(&flag))) {
+                entry.is_session = flag == TRUE;
+              }
+              COREWEBVIEW2_COOKIE_SAME_SITE_KIND same_site =
+                  COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX;
+              if (SUCCEEDED(cookie->get_SameSite(&same_site))) {
+                entry.same_site = static_cast<int>(same_site);
+              }
+              cookies.push_back(std::move(entry));
+            }
+
+            callback(true, std::move(cookies));
+            return S_OK;
+          })
+          .Get());
+
+  if (FAILED(hr)) {
+    callback(false, {});
+  }
+}
+
+bool Webview::SetCookie(const WebviewCookie& cookie) {
+  wil::com_ptr<ICoreWebView2CookieManager> cookie_manager;
+  auto webview2 = webview_ ? webview_.try_query<ICoreWebView2_2>() : nullptr;
+  if (!IsValid() || !webview2 ||
+      FAILED(webview2->get_CookieManager(cookie_manager.put())) ||
+      !cookie_manager) {
+    return false;
+  }
+
+  wil::com_ptr<ICoreWebView2Cookie> native_cookie;
+  if (FAILED(cookie_manager->CreateCookie(
+          util::Utf16FromUtf8(cookie.name).c_str(),
+          util::Utf16FromUtf8(cookie.value).c_str(),
+          util::Utf16FromUtf8(cookie.domain).c_str(),
+          util::Utf16FromUtf8(cookie.path).c_str(), native_cookie.put())) ||
+      !native_cookie) {
+    return false;
+  }
+
+  // A negative expiry marks a session cookie, which is the created cookie's
+  // default; only a concrete expiry needs to be written.
+  if (cookie.expires >= 0) {
+    native_cookie->put_Expires(cookie.expires);
+  }
+  native_cookie->put_IsSecure(cookie.is_secure ? TRUE : FALSE);
+  native_cookie->put_IsHttpOnly(cookie.is_http_only ? TRUE : FALSE);
+  native_cookie->put_SameSite(
+      static_cast<COREWEBVIEW2_COOKIE_SAME_SITE_KIND>(cookie.same_site));
+
+  return SUCCEEDED(cookie_manager->AddOrUpdateCookie(native_cookie.get()));
+}
+
+bool Webview::DeleteCookies(const std::string& name, const std::string& uri) {
+  wil::com_ptr<ICoreWebView2CookieManager> cookie_manager;
+  auto webview2 = webview_ ? webview_.try_query<ICoreWebView2_2>() : nullptr;
+  if (!IsValid() || !webview2 ||
+      FAILED(webview2->get_CookieManager(cookie_manager.put())) ||
+      !cookie_manager) {
+    return false;
+  }
+
+  const auto wname = util::Utf16FromUtf8(name);
+  const auto wuri = util::Utf16FromUtf8(uri);
+  return SUCCEEDED(cookie_manager->DeleteCookies(
+      wname.c_str(), uri.empty() ? nullptr : wuri.c_str()));
+}
+
 bool Webview::ClearCookies() {
   if (!IsValid()) {
     return false;

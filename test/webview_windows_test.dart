@@ -313,6 +313,157 @@ void main() {
       ]);
     });
 
+    test('getCookies decodes the cookie list', () async {
+      mockNativeSide(
+        onInstanceCall: (call) {
+          if (call.method == 'getCookies') {
+            expect(call.arguments, 'https://example.com');
+            return [
+              {
+                'name': 'session',
+                'value': 'abc',
+                'domain': '.example.com',
+                'path': '/',
+                'expires': -1.0,
+                'isSecure': true,
+                'isHttpOnly': true,
+                'isSession': true,
+                'sameSite': 2,
+              },
+              {
+                'name': 'theme',
+                'value': 'dark',
+                'domain': 'example.com',
+                'path': '/app',
+                'expires': 1893456000.0,
+                'isSecure': false,
+                'isHttpOnly': false,
+                'isSession': false,
+                'sameSite': 0,
+              },
+            ];
+          }
+          return null;
+        },
+      );
+
+      final cookies = await controller.getCookies('https://example.com');
+      expect(cookies, hasLength(2));
+
+      expect(cookies[0].name, 'session');
+      expect(cookies[0].value, 'abc');
+      expect(cookies[0].domain, '.example.com');
+      expect(cookies[0].path, '/');
+      expect(cookies[0].expires, isNull);
+      expect(cookies[0].isSession, isTrue);
+      expect(cookies[0].isSecure, isTrue);
+      expect(cookies[0].isHttpOnly, isTrue);
+      expect(cookies[0].sameSite, WebviewCookieSameSite.strict);
+
+      expect(
+        cookies[1].expires,
+        DateTime.fromMillisecondsSinceEpoch(1893456000000, isUtc: true),
+      );
+      expect(cookies[1].isSession, isFalse);
+      expect(cookies[1].sameSite, WebviewCookieSameSite.none);
+    });
+
+    test('getCookies requests all cookies by default', () async {
+      mockNativeSide(
+        onInstanceCall: (call) =>
+            call.method == 'getCookies' ? const <dynamic>[] : null,
+      );
+      final cookies = await controller.getCookies();
+      expect(cookies, isEmpty);
+      expect(instanceLog.last, isMethodCall('getCookies', arguments: ''));
+    });
+
+    test('getCookies maps unknown SameSite kinds to lax', () async {
+      mockNativeSide(
+        onInstanceCall: (call) => call.method == 'getCookies'
+            ? [
+                {
+                  'name': 'a',
+                  'value': 'b',
+                  'domain': '',
+                  'path': '/',
+                  'expires': -1.0,
+                  'isSecure': false,
+                  'isHttpOnly': false,
+                  'isSession': true,
+                  'sameSite': 99,
+                },
+              ]
+            : null,
+      );
+      final cookies = await controller.getCookies();
+      expect(cookies.single.sameSite, WebviewCookieSameSite.lax);
+    });
+
+    test('setCookie sends the full wire representation', () async {
+      final expires = DateTime.utc(2030, 1, 1);
+      await controller.setCookie(
+        WebviewCookie(
+          name: 'session',
+          value: 'abc',
+          domain: '.example.com',
+          path: '/app',
+          expires: expires,
+          isSecure: true,
+          isHttpOnly: true,
+          sameSite: WebviewCookieSameSite.strict,
+        ),
+      );
+      expect(
+        single(),
+        isMethodCall(
+          'setCookie',
+          arguments: <String, dynamic>{
+            'name': 'session',
+            'value': 'abc',
+            'domain': '.example.com',
+            'path': '/app',
+            'expires': expires.millisecondsSinceEpoch / 1000.0,
+            'isSecure': true,
+            'isHttpOnly': true,
+            'sameSite': 2,
+          },
+        ),
+      );
+    });
+
+    test('setCookie sends -1 expiry for session cookies', () async {
+      await controller.setCookie(const WebviewCookie(name: 'a', value: 'b'));
+      final args = single().arguments as Map<dynamic, dynamic>;
+      expect(args['expires'], -1.0);
+      expect(args['domain'], '');
+      expect(args['path'], '/');
+      expect(args['sameSite'], WebviewCookieSameSite.lax.index);
+    });
+
+    test('deleteCookies sends name and uri', () async {
+      await controller.deleteCookies('session', uri: 'https://example.com');
+      await controller.deleteCookies('theme');
+      expect(instanceLog, [
+        isMethodCall(
+          'deleteCookies',
+          arguments: ['session', 'https://example.com'],
+        ),
+        isMethodCall('deleteCookies', arguments: ['theme', '']),
+      ]);
+    });
+
+    test(
+      'setSize sends logical size and scale factor (headless use)',
+      () async {
+        await controller.setSize(const Size(1024, 768), scaleFactor: 2.0);
+        expect(
+          single(),
+          isMethodCall('setSize', arguments: [1024.0, 768.0, 2.0]),
+        );
+      },
+    );
+
     test('setFpsLimit', () async {
       await controller.setFpsLimit();
       await controller.setFpsLimit(30);
@@ -503,6 +654,10 @@ void main() {
 
       await controller.loadUrl('https://a');
       await controller.reload();
+      await controller.setCookie(const WebviewCookie(name: 'a', value: 'b'));
+      await controller.deleteCookies('a');
+      await controller.setSize(const Size(100, 100));
+      expect(await controller.getCookies(), isEmpty);
       expect(instanceLog, isEmpty);
     });
   });
@@ -1049,6 +1204,14 @@ void main() {
         WebviewHostResourceAccessKind.deny,
         WebviewHostResourceAccessKind.allow,
         WebviewHostResourceAccessKind.denyCors,
+      ]);
+    });
+
+    test('WebviewCookieSameSite order', () {
+      expect(WebviewCookieSameSite.values, const [
+        WebviewCookieSameSite.none,
+        WebviewCookieSameSite.lax,
+        WebviewCookieSameSite.strict,
       ]);
     });
 

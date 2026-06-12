@@ -32,9 +32,11 @@ issues, and transforms, opacity, and widgets painted on top all just work.
   errors, web messages, and native focus.
 - **Two-way JavaScript bridge**: execute scripts, register
   on-document-created scripts, and exchange JSON messages with the page.
-- **Browser control**: cookies, cache, user agent, zoom, background color,
-  popup policy, virtual host mapping, suspend/resume, FPS limiting, and
-  DevTools.
+- **Browser control**: full cookie management (read, write, delete), cache,
+  user agent, zoom, background color, popup policy, virtual host mapping,
+  suspend/resume, FPS limiting, and DevTools.
+- **Headless mode**: drive a controller without a widget for background
+  pages, scraping, or pre-warming.
 - **Faithful input forwarding**: mouse, high-precision trackpad scrolling,
   and multi-touch.
 - **High-DPI aware**, including per-view scale factors in multi-window apps.
@@ -176,6 +178,48 @@ window.chrome.webview.addEventListener('message', (e) => {
 window.chrome.webview.postMessage({command: 'pong'});
 ```
 
+## Cookies
+
+Read, write, and delete cookies through the WebView2 cookie store - useful
+for extracting a session token after a login flow or seeding one before it:
+
+```dart
+final cookies = await controller.getCookies('https://example.com');
+final session = cookies.firstWhere((c) => c.name == 'session');
+
+await controller.setCookie(WebviewCookie(
+  name: 'theme',
+  value: 'dark',
+  domain: '.example.com',
+  expires: DateTime.now().add(const Duration(days: 30)),
+  isSecure: true,
+  sameSite: WebviewCookieSameSite.strict,
+));
+
+await controller.deleteCookies('theme', uri: 'https://example.com');
+await controller.clearCookies(); // everything
+```
+
+Omit `expires` to create a session cookie; pass an empty `uri` to
+`getCookies` to list every cookie of the profile.
+
+## Headless usage
+
+A controller works without a `Webview` widget: initialize it, give the
+invisible page real bounds with `setSize` (pages do not perform layout until
+they have nonzero bounds), and drive it through the normal API - load pages,
+run scripts, exchange messages, read cookies. Nothing is rendered and no
+frames are captured:
+
+```dart
+final background = WebviewController();
+await background.initialize();
+await background.setSize(const Size(1280, 720));
+await background.loadUrl('https://example.com/login');
+// ... executeScript, webMessage, getCookies ...
+await background.dispose();
+```
+
 ## Permission requests
 
 Web content can request browser permissions (camera, microphone, geolocation,
@@ -223,7 +267,11 @@ await WebviewController.initializeEnvironment(
 );
 ```
 
-It throws a `PlatformException` if the environment already exists.
+The environment's lifecycle is reference counted: it is released when the
+last controller is disposed. That means `initializeEnvironment` can be
+called again - for example with a different `userDataPath` - once all
+controllers are gone; it only throws a `PlatformException` while controllers
+are alive.
 
 ## Example app and tests
 

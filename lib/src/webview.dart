@@ -48,6 +48,88 @@ class WebviewDownloadEvent {
   );
 }
 
+/// An HTTP cookie, as managed by the WebView2 cookie store.
+///
+/// Returned by [WebviewController.getCookies] and accepted by
+/// [WebviewController.setCookie].
+class WebviewCookie {
+  /// The cookie name.
+  final String name;
+
+  /// The cookie value.
+  final String value;
+
+  /// The host the cookie belongs to. An empty domain on [setCookie] scopes
+  /// the cookie to the document's host.
+  final String domain;
+
+  /// The URL path the cookie applies to.
+  final String path;
+
+  /// The expiration time, or `null` for a session cookie.
+  final DateTime? expires;
+
+  /// Whether the cookie is only sent over HTTPS.
+  final bool isSecure;
+
+  /// Whether the cookie is inaccessible to JavaScript.
+  final bool isHttpOnly;
+
+  /// The SameSite policy of the cookie.
+  final WebviewCookieSameSite sameSite;
+
+  /// Whether this is a session cookie (no expiration time).
+  bool get isSession => expires == null;
+
+  /// Creates a cookie. [domain] and [path] follow the browser defaults when
+  /// omitted; omit [expires] for a session cookie.
+  const WebviewCookie({
+    required this.name,
+    required this.value,
+    this.domain = '',
+    this.path = '/',
+    this.expires,
+    this.isSecure = false,
+    this.isHttpOnly = false,
+    this.sameSite = WebviewCookieSameSite.lax,
+  });
+
+  WebviewCookie._fromNative(Map<dynamic, dynamic> map)
+    : name = map['name'] as String,
+      value = map['value'] as String,
+      domain = map['domain'] as String,
+      path = map['path'] as String,
+      expires = (map['expires'] as double) < 0
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(
+              ((map['expires'] as double) * 1000).round(),
+              isUtc: true,
+            ),
+      isSecure = map['isSecure'] as bool,
+      isHttpOnly = map['isHttpOnly'] as bool,
+      sameSite = _sameSiteFromNative(map['sameSite'] as int);
+
+  // A newer WebView2 runtime could report a SameSite kind this enum does not
+  // know; degrade to the browser default instead of throwing a RangeError.
+  static WebviewCookieSameSite _sameSiteFromNative(int index) =>
+      index >= 0 && index < WebviewCookieSameSite.values.length
+      ? WebviewCookieSameSite.values[index]
+      : WebviewCookieSameSite.lax;
+
+  Map<String, dynamic> _toNative() => <String, dynamic>{
+    'name': name,
+    'value': value,
+    'domain': domain,
+    'path': path,
+    'expires': expires == null
+        ? -1.0
+        : expires!.millisecondsSinceEpoch / 1000.0,
+    'isSecure': isSecure,
+    'isHttpOnly': isHttpOnly,
+    'sameSite': sameSite.index,
+  };
+}
+
 /// Invoked when the web content requests a browser permission (camera,
 /// microphone, geolocation etc.).
 ///
@@ -115,15 +197,17 @@ class WebviewValue {
 /// All event streams are broadcast streams: they support multiple listeners
 /// and drop events that are emitted while nobody listens.
 class WebviewController extends ValueNotifier<WebviewValue> {
-  /// Explicitly initializes the underlying WebView environment
+  /// Explicitly configures the underlying WebView environment
   /// using an optional [browserExePath], an optional [userDataPath]
   /// and optional Chromium command line arguments [additionalArguments].
   ///
-  /// The environment is shared between all WebviewController instances and
-  /// can be initialized only once. Initialization must take place before any
-  /// WebviewController is created/initialized.
+  /// The environment is shared between all WebviewController instances. Its
+  /// lifecycle is reference counted: it is created with the first controller
+  /// and released when the last controller is disposed, so this method can
+  /// be called again - with a different configuration - once every
+  /// controller has been disposed.
   ///
-  /// Throws [PlatformException] if the environment was initialized before.
+  /// Throws [PlatformException] if any controller is currently alive.
   static Future<void> initializeEnvironment({
     String? userDataPath,
     String? browserExePath,
@@ -596,6 +680,37 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     return _channel.invokeMethod('setUserAgent', userAgent);
   }
 
+  /// Returns the cookies that match [uri], or all cookies of the browser
+  /// profile when [uri] is empty.
+  Future<List<WebviewCookie>> getCookies([String uri = '']) async {
+    if (_isDisposed) {
+      return const [];
+    }
+    final cookies = await _channel.invokeListMethod<dynamic>('getCookies', uri);
+    return [
+      for (final cookie in cookies ?? const [])
+        WebviewCookie._fromNative(cookie as Map<dynamic, dynamic>),
+    ];
+  }
+
+  /// Adds [cookie] to the cookie store, replacing any cookie with the same
+  /// name, domain and path.
+  Future<void> setCookie(WebviewCookie cookie) async {
+    if (_isDisposed) {
+      return;
+    }
+    return _channel.invokeMethod('setCookie', cookie._toNative());
+  }
+
+  /// Deletes the cookies named [name] under [uri], or under every domain and
+  /// path when [uri] is empty.
+  Future<void> deleteCookies(String name, {String uri = ''}) async {
+    if (_isDisposed) {
+      return;
+    }
+    return _channel.invokeMethod('deleteCookies', [name, uri]);
+  }
+
   /// Clears browser cookies.
   Future<void> clearCookies() async {
     if (_isDisposed) {
@@ -777,8 +892,14 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     return _channel.invokeMethod('setScrollDelta', [dx, dy]);
   }
 
-  /// Sets the surface size to the provided [size].
-  Future<void> _setSize(Size size, double scaleFactor) async {
+  /// Sets the size of the browser surface in logical pixels.
+  ///
+  /// A [Webview] widget calls this automatically whenever its layout
+  /// changes; call it manually only for headless use, i.e. when driving a
+  /// controller without embedding a [Webview] widget (background pages,
+  /// scraping, pre-warming). Pages do not perform layout until they have
+  /// nonzero bounds.
+  Future<void> setSize(Size size, {double scaleFactor = 1.0}) async {
     if (_isDisposed) {
       return;
     }
@@ -999,7 +1120,7 @@ class _WebviewState extends State<Webview> {
     if (!mounted || !_controller.value.isInitialized) {
       return;
     }
-    unawaited(_controller._setSize(box.size, devicePixelRatio));
+    unawaited(_controller.setSize(box.size, scaleFactor: devicePixelRatio));
   }
 
   @override

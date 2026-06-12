@@ -57,9 +57,23 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   virtual ~WebviewWindowsPlugin();
 
  private:
+  // The options initializeEnvironment was last called with. They outlive the
+  // environment itself so that an environment recreated for a later webview
+  // (after the previous one was released) is configured identically.
+  struct EnvironmentOptions {
+    std::optional<std::wstring> user_data_path;
+    std::optional<std::wstring> browser_exe_path;
+    std::optional<std::string> additional_arguments;
+  };
+
   std::unique_ptr<WebviewPlatform> platform_;
   std::unique_ptr<WebviewHost> webview_host_;
+  EnvironmentOptions environment_options_{};
   std::unordered_map<int64_t, std::unique_ptr<WebviewBridge>> instances_;
+  // Creations whose async completion is still outstanding. The environment
+  // must not be released while any of these exist: the completion handler
+  // still runs on the host.
+  int pending_creations_ = 0;
 
   WNDCLASS window_class_ = {};
   flutter::PluginRegistrarWindows* registrar_;
@@ -117,9 +131,14 @@ void WebviewWindowsPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   if (method_call.method_name().compare(kMethodInitializeEnvironment) == 0) {
-    if (webview_host_) {
-      return result->Error(kErrorCodeEnvironmentAlreadyInitialized,
-                           "The webview environment is already initialized");
+    // The environment can be (re)configured whenever no webviews are alive:
+    // it is released when the last instance is disposed, so a later call can
+    // legitimately set up a different configuration.
+    if (!instances_.empty() || pending_creations_ > 0) {
+      return result->Error(
+          kErrorCodeEnvironmentAlreadyInitialized,
+          "The webview environment cannot be configured while webviews "
+          "exist. Dispose all WebviewControllers first.");
     }
 
     if (!InitPlatform()) {
@@ -134,31 +153,34 @@ void WebviewWindowsPlugin::HandleMethodCall(
                            "initializeEnvironment expects a map.");
     }
 
-    std::optional<std::wstring> browser_exe_wpath = std::nullopt;
+    EnvironmentOptions options;
     std::optional<std::string> browser_exe_path =
         GetOptionalValue<std::string>(*map, "browserExePath");
     if (browser_exe_path) {
-      browser_exe_wpath = util::Utf16FromUtf8(*browser_exe_path);
+      options.browser_exe_path = util::Utf16FromUtf8(*browser_exe_path);
     }
 
-    std::optional<std::wstring> user_data_wpath = std::nullopt;
     std::optional<std::string> user_data_path =
         GetOptionalValue<std::string>(*map, "userDataPath");
     if (user_data_path) {
-      user_data_wpath = util::Utf16FromUtf8(*user_data_path);
+      options.user_data_path = util::Utf16FromUtf8(*user_data_path);
     } else {
-      user_data_wpath = platform_->GetDefaultDataDirectory();
+      options.user_data_path = platform_->GetDefaultDataDirectory();
     }
 
-    std::optional<std::string> additional_args =
+    options.additional_arguments =
         GetOptionalValue<std::string>(*map, "additionalArguments");
 
-    webview_host_ = WebviewHost::Create(
-        platform_.get(), user_data_wpath, browser_exe_wpath, additional_args);
-    if (!webview_host_) {
+    webview_host_ = nullptr;
+    auto host = WebviewHost::Create(platform_.get(), options.user_data_path,
+                                    options.browser_exe_path,
+                                    options.additional_arguments);
+    if (!host) {
       return result->Error(kErrorCodeEnvironmentCreationFailed);
     }
 
+    environment_options_ = std::move(options);
+    webview_host_ = std::move(host);
     return result->Success();
   }
 
@@ -201,6 +223,14 @@ void WebviewWindowsPlugin::HandleMethodCall(
       const auto it = instances_.find(*texture_id);
       if (it != instances_.end()) {
         instances_.erase(it);
+        // Reference-counted environment lifecycle: when the last webview is
+        // gone (and no creation is in flight, since its completion handler
+        // still runs on the host), release the environment so the browser
+        // processes can shut down and a later initializeEnvironment can
+        // reconfigure it.
+        if (instances_.empty() && pending_creations_ == 0) {
+          webview_host_ = nullptr;
+        }
         return result->Success();
       }
     }
@@ -218,8 +248,15 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
   }
 
   if (!webview_host_) {
-    webview_host_ = std::move(WebviewHost::Create(
-        platform_.get(), platform_->GetDefaultDataDirectory()));
+    // Recreate the environment from the stored options so a webview created
+    // after the previous environment was released behaves identically.
+    auto user_data_path = environment_options_.user_data_path
+                              ? environment_options_.user_data_path
+                              : std::make_optional(
+                                    platform_->GetDefaultDataDirectory());
+    webview_host_ = WebviewHost::Create(
+        platform_.get(), user_data_path, environment_options_.browser_exe_path,
+        environment_options_.additional_arguments);
     if (!webview_host_) {
       return result->Error(kErrorCodeEnvironmentCreationFailed);
     }
@@ -231,11 +268,18 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
 
   std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
       shared_result = std::move(result);
+  ++pending_creations_;
   webview_host_->CreateWebview(
       hwnd, GetFlutterViewHwnd(), true, true,
       [shared_result, this](std::unique_ptr<Webview> webview,
                             std::unique_ptr<WebviewCreationError> error) {
+        --pending_creations_;
         if (!webview) {
+          // A failed creation may have been the only reason the environment
+          // was alive; apply the same release-on-zero rule as dispose.
+          if (instances_.empty() && pending_creations_ == 0) {
+            webview_host_ = nullptr;
+          }
           if (error) {
             return shared_result->Error(
                 kErrorCodeWebviewCreationFailed,
