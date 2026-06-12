@@ -252,8 +252,7 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
     // after the previous environment was released behaves identically.
     auto user_data_path = environment_options_.user_data_path
                               ? environment_options_.user_data_path
-                              : std::make_optional(
-                                    platform_->GetDefaultDataDirectory());
+                              : platform_->GetDefaultDataDirectory();
     webview_host_ = WebviewHost::Create(
         platform_.get(), user_data_path, environment_options_.browser_exe_path,
         environment_options_.additional_arguments);
