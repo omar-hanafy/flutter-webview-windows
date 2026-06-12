@@ -512,7 +512,7 @@ void Webview::GetCookies(const std::string& uri, GetCookiesCallback callback) {
   const auto wuri = util::Utf16FromUtf8(uri);
   const auto hr = cookie_manager->GetCookies(
       uri.empty() ? nullptr : wuri.c_str(),
-      Callback<ICoreWebView2GetCookieListCompletedHandler>(
+      Callback<ICoreWebView2GetCookiesCompletedHandler>(
           [callback](HRESULT result,
                      ICoreWebView2CookieList* cookie_list) -> HRESULT {
             if (FAILED(result) || !cookie_list) {
