@@ -36,6 +36,9 @@ Fixes the long-standing focus loss issue
 * Clicking Flutter UI outside a webview hands keyboard focus back to Flutter
   automatically, and pressing `Tab` past the page's last focusable element
   moves focus back to Flutter instead of cycling inside the page forever.
+* A Flutter text input gaining focus (e.g. an autofocused `TextField` in a
+  dialog opened while the page holds focus) hands keyboard focus back to
+  Flutter as well, even when no click occurs.
 * New API: `WebviewController.focus()`, `WebviewController.releaseFocus()`,
   the `onFocusChanged` stream, and `hasNativeFocus`.
 

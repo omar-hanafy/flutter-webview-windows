@@ -1145,6 +1145,88 @@ void main() {
 
       await unmountAndDispose(tester, controller);
     });
+
+    testWidgets('focusing a Flutter text input while the webview has native '
+        'focus returns focus to Flutter', (tester) async {
+      final controller = await createInitializedController(tester);
+      final textFieldFocus = FocusNode();
+      addTearDown(textFieldFocus.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                SizedBox(width: 300, height: 300, child: Webview(controller)),
+                TextField(focusNode: textFieldFocus),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Focusing the text input while no webview holds native focus must not
+      // trigger a handover.
+      pluginLog.clear();
+      textFieldFocus.requestFocus();
+      await tester.pump();
+      expect(pluginLog.where((c) => c.method == 'reclaimFocus'), isEmpty);
+      textFieldFocus.unfocus();
+      await tester.pump();
+
+      // Give the webview native focus (as WebView2 reports after a click).
+      eventSink!.success({'type': 'focus', 'value': true});
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      expect(controller.hasNativeFocus, isTrue);
+
+      // A text input gaining Flutter focus - e.g. an autofocused TextField in
+      // a programmatically opened dialog - must hand native focus back even
+      // though no pointer press occurred.
+      pluginLog.clear();
+      textFieldFocus.requestFocus();
+      await tester.pump();
+      expect(pluginLog.where((c) => c.method == 'reclaimFocus'), hasLength(1));
+
+      await unmountAndDispose(tester, controller);
+    });
+
+    testWidgets('focusing a non-text-input node does not release native '
+        'focus', (tester) async {
+      final controller = await createInitializedController(tester);
+      final wrapperFocus = FocusNode();
+      addTearDown(wrapperFocus.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                SizedBox(width: 300, height: 300, child: Webview(controller)),
+                Focus(focusNode: wrapperFocus, child: const SizedBox.shrink()),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      eventSink!.success({'type': 'focus', 'value': true});
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      expect(controller.hasNativeFocus, isTrue);
+
+      // Packages embedding the webview park Flutter focus on a wrapper Focus
+      // node when the user clicks into web content; that must not be treated
+      // as Flutter UI demanding the keyboard.
+      pluginLog.clear();
+      wrapperFocus.requestFocus();
+      await tester.pump();
+      expect(pluginLog.where((c) => c.method == 'reclaimFocus'), isEmpty);
+
+      await unmountAndDispose(tester, controller);
+    });
   });
 
   group('native enum contracts', () {

@@ -1152,6 +1152,17 @@ class _WebviewState extends State<Webview> {
 /// Using the claim instead of a geometric bounds check means the handover
 /// honors hit testing, widgets painted on top of a webview, and render
 /// transforms - all of which a rectangle test would get wrong.
+///
+/// Pointer presses are not the only way Flutter UI can demand the keyboard:
+/// a dialog opened programmatically may autofocus a [TextField] while a
+/// webview still holds native focus, in which case its keystrokes would keep
+/// landing in the page. The coordinator therefore also watches Flutter's
+/// [FocusManager]: whenever primary focus moves into a Flutter text input
+/// while a webview holds native focus, focus is handed back the same way.
+/// The check is deliberately limited to text inputs - packages embedding the
+/// webview commonly park Flutter focus on a wrapper [Focus] node when the
+/// user clicks into web content, and releasing on every focus change would
+/// fight that pattern.
 class _WebviewFocusCoordinator {
   static final Set<_WebviewState> _instances = <_WebviewState>{};
   static final Set<int> _claimedPointers = <int>{};
@@ -1162,6 +1173,7 @@ class _WebviewFocusCoordinator {
     if (!_routeInstalled) {
       _routeInstalled = true;
       GestureBinding.instance.pointerRouter.addGlobalRoute(_handlePointerEvent);
+      FocusManager.instance.addListener(_handleFlutterFocusChange);
     }
   }
 
@@ -1173,6 +1185,7 @@ class _WebviewFocusCoordinator {
       GestureBinding.instance.pointerRouter.removeGlobalRoute(
         _handlePointerEvent,
       );
+      FocusManager.instance.removeListener(_handleFlutterFocusChange);
     }
   }
 
@@ -1194,9 +1207,27 @@ class _WebviewFocusCoordinator {
       return;
     }
 
+    _releaseNativeFocusIfHeld();
+  }
+
+  static void _handleFlutterFocusChange() {
+    final context = FocusManager.instance.primaryFocus?.context;
+    if (context == null) {
+      return;
+    }
+    // A text input's focus node is attached inside the EditableText that
+    // every Flutter text field (TextField, CupertinoTextField,
+    // SelectableText, ...) builds, so it is found as an ancestor state.
+    if (context.findAncestorStateOfType<EditableTextState>() == null) {
+      return;
+    }
+    _releaseNativeFocusIfHeld();
+  }
+
+  static void _releaseNativeFocusIfHeld() {
     for (final state in _instances) {
       if (state._controller._hasNativeFocus) {
-        // The press landed outside every webview while one still holds native
+        // Flutter UI wants the keyboard while a webview still holds native
         // focus; return Win32 keyboard focus to the Flutter view.
         unawaited(WebviewController.releaseFocus());
         return;
